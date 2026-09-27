@@ -72,7 +72,8 @@ LEGAL_MAP = {
 }
 LEGAL = {v for v in LEGAL_MAP.values() if v}
 LEGAL_SKEL = {"prpt": "pvt", "lntt": "ltd", "lnt": "ltd", "nkrprtt": "inc", "krprsn": "corp", "lp": "llp", "llp": "llp"}
-NAME_STOP = {"the", "and", "ms", "m", "of", "dba", "a"}
+NAME_STOP = {"the", "and", "ms", "m", "of", "dba", "a",
+             "et", "de", "du", "des", "la", "le", "les", "l", "d"}  # French articles / "and"
 _DBA = re.compile(r"\b(?:d\s*/\s*b\s*/\s*a|d\.b\.a\.?|dba|doing business as|trading as|t/a|a\.k\.a\.?|aka)\b")
 _DOMAIN = re.compile(r"^(?:https?://)?(?:www\.)?([a-z0-9][a-z0-9\-]*)\.(?:com|in|net|org|co|fr|us|biz|info|io)(?:\.[a-z]{2})?/?$")
 _PHONE = re.compile(r"\d{7,}")
@@ -180,7 +181,7 @@ ADDR_ABBR = {
     "pt": "point", "mt": "mount", "ft": "fort", "n": "north", "s": "south", "e": "east", "w": "west",
     "ne": "northeast", "nw": "northwest", "se": "southeast", "sw": "southwest", "apt": "apartment",
     "ste": "suite", "fl": "floor", "flr": "floor", "bldg": "building", "nr": "near", "opp": "opposite",
-    "r": "rue", "imp": "impasse", "ch": "chemin", "rte": "route", "fbg": "faubourg", "cres": "crescent",
+    "r": "rue", "all": "allee", "imp": "impasse", "ch": "chemin", "rte": "route", "fbg": "faubourg", "cres": "crescent",
     "xing": "crossing", "expy": "expressway", "fwy": "freeway", "jct": "junction", "hts": "heights",
     "mtn": "mountain", "vly": "valley", "cyn": "canyon", "spg": "spring", "sta": "station", "ctr": "center",
     "centre": "center", "wy": "way", "aly": "alley", "cv": "cove", "pass": "pass", "pk": "park",
