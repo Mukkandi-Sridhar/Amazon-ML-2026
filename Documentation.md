@@ -125,7 +125,7 @@ We correct this without test labels, assuming only that true matches have the sa
 
 ## 5. Results & Error Analysis
 
-- **F_0.5 Score (macro, out-of-fold on the full training set):** **0.9830** (stage-2 score only: 0.9817; threshold τ = expected-F0.5 rule (≈0.7) + twin gate)
+- **F_0.5 Score (macro, out-of-fold on the full training set):** **0.9841** (stage-2 score only: 0.9827; threshold τ = expected-F0.5 rule (≈0.7) + twin gate)
 - **Common false positives (wrong merges):**
   - Neighbouring businesses: same name, same street, house number off by a few units (`7344` vs `7342 Lambton Green`, `10204` vs `10203 Drew Hill Lane`). The geometry features were added for exactly this case.
   - Sibling businesses at the *same* address with a different trade word (`Jan Consultants Ltd` vs `Jan Solutions Ltd`, `Salasar Services` vs `Salasar Finance`).
@@ -143,7 +143,8 @@ We correct this without test labels, assuming only that true matches have the sa
 | v1 | 3-stage cascade, threshold 0.7 | 0.9765 | 0.966 |
 | v2 | + more data, claimant-consensus context | 0.9793 | 0.962 |
 | v2-cal | v2 + band-level label-shift calibration | – | 0.964 |
-| **v3 (final)** | corrected transliteration, address bigrams, exact keys, token-difference features, **no** consensus, twin gate | **0.9830** | submitted |
+| v3 | corrected transliteration, address bigrams, exact keys, token-difference features, **no** consensus, twin gate | 0.9830 | – |
+| **v4 (final)** | v3 + house-number×address-word retrieval tokens (trade-name aliases), top-8 cascade | **0.9841** | submitted |
 
 What we learned from the leaderboard:
 - Claimant consensus accepted test's twin groups.
@@ -152,7 +153,7 @@ What we learned from the leaderboard:
 
 ## 6. Conclusion
 
-A retrieval + cascade + context design scales to 26M records on a 4-core / 16 GB machine without a GPU, and it reaches **0.9830** macro F0.5 out-of-fold. The biggest wins came from framing the task as a many-to-one assignment, matching phonetic skeletons across scripts, and modelling *how* numbers differ rather than *whether* they differ. With more compute, the next steps would be a small (≤8B, Apache-2.0) multilingual cross-encoder for the ambiguous tail, and cross-source (S2↔S3) cluster consistency features.
+A retrieval + cascade + context design scales to 26M records on a 4-core / 16 GB machine without a GPU, and it reaches **0.9841** macro F0.5 out-of-fold. The biggest wins came from framing the task as a many-to-one assignment, matching phonetic skeletons across scripts, and modelling *how* numbers differ rather than *whether* they differ. With more compute, the next steps would be a small (≤8B, Apache-2.0) multilingual cross-encoder for the ambiguous tail, and cross-source (S2↔S3) cluster consistency features.
 
 ---
 
@@ -185,4 +186,4 @@ No external data, APIs, geocoders or pretrained models are used. The only dictio
 | Stage-1 top-6 recall (of retrieved) | 99.41% |
 | Overall candidate recall ceiling | ≈97.0% |
 | Stage-2 pair precision / recall @0.5 (held-out sample) | 98.9% / 94.6% |
-| Macro F0.5 OOF (final) | 0.9830 |
+| Macro F0.5 OOF (final) | 0.9841 |
