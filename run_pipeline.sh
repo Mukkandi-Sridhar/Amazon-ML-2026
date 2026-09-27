@@ -20,6 +20,8 @@ python run_features.py "$WORK" train "$WORK/stage1_light.txt"
 python run_features.py "$WORK" test "$WORK/stage1_light.txt"
 python run_stage2.py "$WORK" "$WORK/train_gt.parquet" all
 python run_stage3.py tune "$WORK" "$WORK/train_gt.parquet"
-python run_stage3.py write "$WORK" test "$OUT" "$DATA/test/test_source1.tsv"
+python run_stage3.py write "$WORK" test "$OUT" "$DATA/test/test_source1.tsv"      # also writes candidate_pairs.tsv
+# final decision: expected-F0.5 + test-specific twin gate (house-number offsets), overwrites matching_results.tsv
+python run_final2.py "$WORK" "$WORK/train_oof.parquet" "$WORK/test_scores.parquet" p3 "$OUT" "$DATA/test/test_source1.tsv" 0.9
 python "$SRC/../utils/validate_submission.py" --matching "$OUT/matching_results.tsv" \
        --candidate "$OUT/candidate_pairs.tsv" --test-dir "$DATA/test"
