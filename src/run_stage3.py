@@ -39,13 +39,27 @@ PARAMS = dict(objective="binary", learning_rate=0.1, num_leaves=127, min_data_in
 ROUNDS = 400
 
 
-P2_MIN = 1e-3  # pairs below this stage-2 probability are never assigned; dropping them keeps stage 3 in memory
+P2_MIN = 0.01  # pairs below this stage-2 probability are (almost) never assigned; dropping them keeps stage 3 in memory
 
 
 def load(work, split):
     cols = ["qi", "si", "y"] + BASE if split == "train" else ["qi", "si"] + BASE
-    return pl.concat([pl.read_parquet(p, columns=cols).filter(pl.col("p2") >= P2_MIN)
-                      for p in sorted(glob.glob(f"{work}/{split}_p2/part-*.parquet"))])
+    parts = []
+    for p in sorted(glob.glob(f"{work}/{split}_p2/part-*.parquet")):
+        d = pl.read_parquet(p, columns=cols).filter(pl.col("p2") >= P2_MIN)
+        parts.append(d.with_columns([pl.col(c).cast(pl.Float32) for c, t in d.schema.items() if t == pl.Float64]))
+    return pl.concat(parts)
+
+
+def _f32(d):
+    return d.with_columns([pl.col(c).cast(pl.Float32) for c, t in d.schema.items() if t == pl.Float64])
+
+
+def build(work, split):
+    d = _f32(context(load(work, split)))
+    if any(f in FEATS for f in CONS):
+        d = _f32(consensus(d, work, split))
+    return d
 
 
 def all_pairs(work, split):
@@ -159,7 +173,7 @@ def decide(d, cfg):
 
 def tune(work, gt_path):
     t = time.time()
-    d = consensus(context(load(work, "train")), work, "train")
+    d = build(work, "train")
     print("context", d.shape, round(time.time() - t), flush=True)
     p3 = np.zeros(d.height, dtype=np.float32)
     fold = (d["qi"].to_numpy() % 2)
@@ -202,7 +216,7 @@ def write_outputs(work, split, out_dir, raw_s1_path):
     """Predict with stage-3 fold models, assign and write both submission files."""
     import os
     cfg = json.load(open(f"{work}/threshold.json"))
-    d = consensus(context(load(work, split)), work, split)
+    d = build(work, split)
     X = d.select(FEATS).to_numpy().astype(np.float32)
     ms = [lgb.Booster(model_file=f"{work}/stage3_fold{k}.txt") for k in (0, 1)]
     d = d.with_columns(pl.Series("p3", ((ms[0].predict(X) + ms[1].predict(X)) / 2).astype(np.float32)))
