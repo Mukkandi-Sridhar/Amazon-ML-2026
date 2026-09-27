@@ -9,8 +9,8 @@ This is a solution for the Amazon ML Challenge 2026 on Unstop. Given business re
 
 | | |
 |---|---|
-| Out-of-fold macro F0.5 on the **full** training set (all 2.2M S1 entities) | **0.9830** |
-| Candidate recall ceiling (retrieval + cascade) | ≈97.0% of true pairs |
+| Out-of-fold macro F0.5 on the **full** training set (all 2.2M S1 entities) | **0.9841** |
+| Candidate recall ceiling (retrieval + cascade) | 97.7% of true pairs |
 
 The full methodology write-up is in [`Documentation.md`](Documentation.md), which is the filled-in official template.
 
