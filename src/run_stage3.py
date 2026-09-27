@@ -20,7 +20,8 @@ from metric import macro_f05
 
 BASE = ["p2", "p1", "cos_n", "cos_a", "n_tset", "a_tset", "pnum_eq", "num_cq", "sk_cat", "ad_empty", "src",
         "n_ratio", "nm_tset", "sk_ratio", "a_ratio", "num_tset", "pn_absdiff", "pn_highdiff_rel", "pn_lowdiff", "st_eq",
-        "city_ratio", "q_nnum", "s_nnum", "nonlat", "dom", "s_core_cnt", "s_skel_cnt", "q_core_cnt", "q_skel_cnt"]
+        "city_ratio", "q_nnum", "s_nnum", "nonlat", "dom", "s_core_cnt", "s_skel_cnt", "q_core_cnt", "q_skel_cnt",
+        "dn_q_idf", "dn_s_idf", "da_q_idf", "da_s_idf", "lg_q", "lg_s", "n_keyed"]
 CTX = ["p2rk", "q_p2max", "q_marg", "q_p2sum", "q_n", "s_n", "s_p2sum_o", "s_p2max_o", "s_srk", "s_ntop_o",
        "s_ntop_same_src_o", "s_top_p2mean_o", "is_qtop"]
 # Consensus among the queries claiming the same Source-1 entity: when several
@@ -48,66 +49,75 @@ def all_pairs(work, split):
     return pl.concat([pl.read_parquet(p, columns=["qi", "si"]) for p in sorted(glob.glob(f"{work}/{split}_p2/part-*.parquet"))])
 
 
-def context(d):
+def context(d, score="p2", sfx=""):
+    """Query- and entity-level context of a score column (default: stage-2 probability)."""
+    sc = pl.col(score)
+    n = lambda base: base + sfx
     d = d.with_columns(
-        pl.col("p2").rank("ordinal", descending=True).over("qi").cast(pl.Int16).alias("p2rk"),
-        pl.col("p2").max().over("qi").alias("q_p2max"),
-        pl.col("p2").sum().over("qi").alias("q_p2sum"),
-        pl.len().over("qi").cast(pl.Int16).alias("q_n"),
+        sc.rank("ordinal", descending=True).over("qi").cast(pl.Int16).alias(n("p2rk")),
+        sc.max().over("qi").alias(n("q_p2max")),
+        sc.sum().over("qi").alias(n("q_p2sum")),
+        pl.len().over("qi").cast(pl.Int16).alias(n("q_n")),
     )
-    second = pl.col("p2").top_k(2).min().over("qi")
+    second = sc.top_k(2).min().over("qi")
     d = d.with_columns(
-        pl.when(pl.col("p2rk") == 1).then(pl.col("p2") - second).otherwise(pl.col("p2") - pl.col("q_p2max")).alias("q_marg"),
-        ((pl.col("p2rk") == 1) & (pl.col("p2") > 0.5)).cast(pl.Int8).alias("is_qtop"),
+        pl.when(pl.col(n("p2rk")) == 1).then(sc - second).otherwise(sc - pl.col(n("q_p2max"))).alias(n("q_marg")),
+        ((pl.col(n("p2rk")) == 1) & (sc > 0.5)).cast(pl.Int8).alias(n("is_qtop")),
     )
-    top = pl.col("is_qtop") == 1
+    top = pl.col(n("is_qtop")) == 1
     d = d.with_columns(
-        pl.len().over("si").cast(pl.Int32).alias("s_n"),
-        (pl.col("p2").sum().over("si") - pl.col("p2")).alias("s_p2sum_o"),
-        pl.col("p2").rank("ordinal", descending=True).over("si").cast(pl.Int32).alias("s_srk"),
-        (pl.col("is_qtop").cast(pl.Int32).sum().over("si") - pl.col("is_qtop")).alias("s_ntop_o"),
-        (pl.col("is_qtop").cast(pl.Int32).sum().over(["si", "src"]) - pl.col("is_qtop")).alias("s_ntop_same_src_o"),
-        ((pl.when(top).then(pl.col("p2")).otherwise(0.0).sum().over("si") - pl.when(top).then(pl.col("p2")).otherwise(0.0))
-         / pl.max_horizontal(pl.col("is_qtop").cast(pl.Int32).sum().over("si") - pl.col("is_qtop"), 1)).alias("s_top_p2mean_o"),
+        pl.len().over("si").cast(pl.Int32).alias(n("s_n")),
+        (sc.sum().over("si") - sc).alias(n("s_p2sum_o")),
+        sc.rank("ordinal", descending=True).over("si").cast(pl.Int32).alias(n("s_srk")),
+        (pl.col(n("is_qtop")).cast(pl.Int32).sum().over("si") - pl.col(n("is_qtop"))).alias(n("s_ntop_o")),
+        (pl.col(n("is_qtop")).cast(pl.Int32).sum().over(["si", "src"]) - pl.col(n("is_qtop"))).alias(n("s_ntop_same_src_o")),
+        ((pl.when(top).then(sc).otherwise(0.0).sum().over("si") - pl.when(top).then(sc).otherwise(0.0))
+         / pl.max_horizontal(pl.col(n("is_qtop")).cast(pl.Int32).sum().over("si") - pl.col(n("is_qtop")), 1)).alias(n("s_top_p2mean_o")),
     )
     # best score among the *other* rows of the same S1 entity
-    g = d.group_by("si").agg(pl.col("p2").max().alias("_m1"), pl.col("p2").top_k(2).min().alias("_m2"))
+    g = d.group_by("si").agg(sc.max().alias("_m1"), sc.top_k(2).min().alias("_m2"))
     d = d.join(g, on="si", how="left")
     d = d.with_columns(
-        pl.when(pl.col("s_n") == 1).then(0.0).when(pl.col("p2") >= pl.col("_m1")).then(pl.col("_m2"))
-        .otherwise(pl.col("_m1")).alias("s_p2max_o")).drop("_m1", "_m2")
+        pl.when(pl.col(n("s_n")) == 1).then(0.0).when(sc >= pl.col("_m1")).then(pl.col("_m2"))
+        .otherwise(pl.col("_m1")).alias(n("s_p2max_o"))).drop("_m1", "_m2")
     return d
 
 
-def consensus(d, work, split):
-    q = pl.concat([pl.read_parquet(f"{work}/{split}_s{i}_norm.parquet", columns=["pnum", "core"]) for i in (2, 3)])
-    s1 = pl.read_parquet(f"{work}/{split}_s1_norm.parquet", columns=["pnum", "core"])
+def _norm_strings(work, split, cols):
+    q = pl.concat([pl.read_parquet(f"{work}/{split}_s{i}_norm.parquet", columns=cols) for i in (2, 3)])
+    s1 = pl.read_parquet(f"{work}/{split}_s1_norm.parquet", columns=cols)
+    return q, s1
+
+
+def consensus(d, work, split, score="p2", sfx="", strings=None):
+    q, s1 = strings if strings is not None else _norm_strings(work, split, ["pnum", "core"])
     qi = d["qi"].to_numpy()
     si = d["si"].to_numpy()
     d = d.with_columns(q["pnum"].gather(qi).fill_null("").alias("_qp"), s1["pnum"].gather(si).fill_null("").alias("_sp"),
                        q["core"].gather(qi).fill_null("").alias("_qc"), s1["core"].gather(si).fill_null("").alias("_sc"))
-    del q, s1
+    sc = pl.col(score)
+    n = lambda base: base + sfx
     hasp = pl.col("_qp") != ""
     d = d.with_columns(
-        pl.when(hasp).then(pl.len().over(["si", "_qp"]) - 1).otherwise(-1).cast(pl.Int32).alias("c_pn_same"),
-        pl.when(hasp).then(pl.col("p2").sum().over(["si", "_qp"]) - pl.col("p2")).otherwise(-1.0).alias("c_pn_same_p2"),
-        (pl.len().over(["si", "_qc"]) - 1).cast(pl.Int32).alias("c_core_same"),
-        (pl.col("p2").sum().over(["si", "_qc"]) - pl.col("p2")).alias("c_core_same_p2"),
-        (pl.when(pl.col("_qp") == pl.col("_sp")).then(pl.col("p2")).otherwise(0.0).sum().over("si")
-         - pl.when(pl.col("_qp") == pl.col("_sp")).then(pl.col("p2")).otherwise(0.0)).alias("c_pn_s_agree_p2"),
+        pl.when(hasp).then(pl.len().over(["si", "_qp"]) - 1).otherwise(-1).cast(pl.Int32).alias(n("c_pn_same")),
+        pl.when(hasp).then(sc.sum().over(["si", "_qp"]) - sc).otherwise(-1.0).alias(n("c_pn_same_p2")),
+        (pl.len().over(["si", "_qc"]) - 1).cast(pl.Int32).alias(n("c_core_same")),
+        (sc.sum().over(["si", "_qc"]) - sc).alias(n("c_core_same_p2")),
+        (pl.when(pl.col("_qp") == pl.col("_sp")).then(sc).otherwise(0.0).sum().over("si")
+         - pl.when(pl.col("_qp") == pl.col("_sp")).then(sc).otherwise(0.0)).alias(n("c_pn_s_agree_p2")),
     )
-    pm = (d.filter(hasp).group_by(["si", "_qp"]).agg(pl.col("p2").sum().alias("w"))
+    pm = (d.filter(hasp).group_by(["si", "_qp"]).agg(sc.sum().alias("w"))
           .sort(["si", "w"], descending=[False, True]).group_by("si", maintain_order=True).first()
           .select("si", pl.col("_qp").alias("_pmode")))
-    cm = (d.group_by(["si", "_qc"]).agg(pl.col("p2").sum().alias("w"))
+    cm = (d.group_by(["si", "_qc"]).agg(sc.sum().alias("w"))
           .sort(["si", "w"], descending=[False, True]).group_by("si", maintain_order=True).first()
           .select("si", pl.col("_qc").alias("_cmode")))
     d = d.join(pm, on="si", how="left").join(cm, on="si", how="left")
     d = d.with_columns(
-        pl.when(hasp).then((pl.col("_qp") == pl.col("_pmode")).cast(pl.Int8)).otherwise(-1).cast(pl.Int8).alias("c_pn_is_mode"),
-        pl.when(pl.col("_pmode").is_null()).then(-1).otherwise((pl.col("_pmode") == pl.col("_sp")).cast(pl.Int8)).cast(pl.Int8).alias("c_mode_eq_s1"),
-        (pl.col("_qc") == pl.col("_cmode")).cast(pl.Int8).alias("c_core_is_mode"),
-        (pl.col("_cmode") == pl.col("_sc")).cast(pl.Int8).alias("c_cmode_eq_s1"),
+        pl.when(hasp).then((pl.col("_qp") == pl.col("_pmode")).cast(pl.Int8)).otherwise(-1).cast(pl.Int8).alias(n("c_pn_is_mode")),
+        pl.when(pl.col("_pmode").is_null()).then(-1).otherwise((pl.col("_pmode") == pl.col("_sp")).cast(pl.Int8)).cast(pl.Int8).alias(n("c_mode_eq_s1")),
+        (pl.col("_qc") == pl.col("_cmode")).cast(pl.Int8).alias(n("c_core_is_mode")),
+        (pl.col("_cmode") == pl.col("_sc")).cast(pl.Int8).alias(n("c_cmode_eq_s1")),
     )
     return d.drop("_qp", "_sp", "_qc", "_sc", "_pmode", "_cmode")
 
@@ -219,3 +229,29 @@ if __name__ == "__main__":
         tune(sys.argv[2], sys.argv[3])
     else:
         write_outputs(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+
+
+def consensus_attrs(d, work, split, score, sfx, attrs=("legal", "nm", "city", "st")):
+    """Generalised claimant consensus for extra attributes (legal form, full name, city, state)."""
+    q, s1 = _norm_strings(work, split, list(attrs))
+    qi = d["qi"].to_numpy()
+    si = d["si"].to_numpy()
+    sc = pl.col(score)
+    for a in attrs:
+        qa, sa = f"_q{a}", f"_s{a}"
+        d = d.with_columns(q[a].gather(qi).fill_null("").alias(qa), s1[a].gather(si).fill_null("").alias(sa))
+        mode = (d.group_by(["si", qa]).agg(sc.sum().alias("w")).sort(["si", "w"], descending=[False, True])
+                .group_by("si", maintain_order=True).first().select("si", pl.col(qa).alias("_mode")))
+        d = d.join(mode, on="si", how="left")
+        d = d.with_columns(
+            (pl.col(qa) == pl.col(sa)).cast(pl.Int8).alias(f"k_{a}_eq_s1{sfx}"),
+            (pl.len().over(["si", qa]) - 1).cast(pl.Int32).alias(f"k_{a}_same{sfx}"),
+            (sc.sum().over(["si", qa]) - sc).alias(f"k_{a}_same_p{sfx}"),
+            (pl.col(qa) == pl.col("_mode")).cast(pl.Int8).alias(f"k_{a}_is_mode{sfx}"),
+            (pl.col("_mode") == pl.col(sa)).cast(pl.Int8).alias(f"k_{a}_mode_eq_s1{sfx}"),
+        ).drop(qa, sa, "_mode")
+    return d
+
+
+def attr_feats(sfx, attrs=("legal", "nm", "city", "st")):
+    return [f"k_{a}_{x}{sfx}" for a in attrs for x in ("eq_s1", "same", "same_p", "is_mode", "mode_eq_s1")]

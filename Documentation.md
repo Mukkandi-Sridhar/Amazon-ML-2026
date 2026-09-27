@@ -49,8 +49,15 @@ TSV ─► normalise (names, addresses, transliteration, skeletons)
 - **Blocking keys used:** two IDF-weighted sparse token channels per record (IDF from Source 1 of the same country; tokens occurring in more than 1% of S1 records are dropped):
   - *Name channel:* normalised core-name words (legal forms removed), phonetic skeleton of every word, skeleton of the whole concatenated name (so `beaconbiotechnologies.com` hits `Beacon Biotechnologies`), and DBA alias words.
   - *Address channel:* address words (abbreviations expanded, states and filler removed) and every number in the address (leading zeros stripped).
-  - Three cosine top-K searches (`sparse_dot_topn`, per country): name-only top-10, address-only top-10, and combined (average) top-15. Their union gives ≈23 candidates per query.
-- **Stage-1 cascade:** a small LightGBM (63 leaves, 150 trees) over 23 cheap features (both channel cosines, per-channel ranks, gap to the query's best, margin to the runner-up, query flags). It keeps the **top 6** candidates per query. This final set is what the matching models see, and it is written to `candidate_pairs.tsv`.
+  - *Address bigrams* (consecutive normalised address words such as `main_cross`, `j_p`, `p_nagar`). Indian addresses are built from very common words that the document-frequency cap removes individually; as pairs they become specific.
+  - Three cosine top-K searches (`sparse_dot_topn`, per country): name-only top-10, address-only top-10, and combined (average) top-15.
+  - **Exact-key passes** (hash joins) that rescue records whose name is shared by dozens of S1 entities, or whose address is truncated to a city and a number:
+    - (core name, house number), (phonetic skeleton, house number) and (concatenated skeleton, house number), used when the key is shared by ≤50 S1 records;
+    - exact core name, skeleton or concatenated skeleton alone, used when shared by ≤10 S1 records.
+
+    Which key matched is passed on as a flag.
+  - The union gives ≈24 candidates per query. On a 15% query sample, adding bigrams and keys raised union recall from 97.57% to **97.88%** (Indic-script India records: 92.9% → **95.3%**).
+- **Stage-1 cascade:** a small LightGBM (63 leaves, 150 trees) over 30 cheap features, including the exact-key flags (both channel cosines, per-channel ranks, gap to the query's best, margin to the runner-up, query flags). It keeps the **top 6** candidates per query. This final set is what the matching models see, and it is written to `candidate_pairs.tsv`.
 - **Candidate pairs generated:** train ≈ 236M retrieved → **61.9M** after the cascade; test ≈ 228M → **[TEST_PAIRS]** after the cascade.
 - **How true matches were not lost** (measured on train):
   - Retrieval union recall is **97.57%** of all true pairs (99.74% for US records that have an address).
@@ -64,6 +71,7 @@ TSV ─► normalise (names, addresses, transliteration, skeletons)
 **Features used (stage 2, 94 in total):**
 - **Name:** RapidFuzz `ratio`, `token_sort_ratio`, `token_set_ratio`, `partial_ratio`, Jaro-Winkler on the core name; ratio / token-set on the phonetic skeleton; ratio / partial ratio on the concatenated skeleton (domain names); token-set on the full name including legal forms; DBA alias vs core; shared-word counts and containment in both directions; first-word equality; legal-form agreement (`llc`↔`llc`, `pvt ltd`↔`pvt ltd`, …).
 - **Address:** token-set / sort / ratio / partial-token-set on normalised address words; shared-word counts and containment; number-set token overlap, shared numbers and containment; primary house-number equality and Levenshtein distance; state equality after canonicalisation; city ratio / partial ratio.
+- **Token differences (16):** for phonetic name tokens and address words, how many tokens appear on only one side, and their summed and maximum IDF (from Source 1), plus the IDF of the shared tokens. A rare differing word ("Consultants" vs "Solutions") marks a different business, while common filler ("Services", "Center") or typos mark noise. Legal forms of both sides are passed as LightGBM categorical codes, so the model learns which legal-form changes are formatting noise (LLC ↔ L.L.C.) and which mark a twin business (Corp → Inc).
 - **House-number geometry (14):** absolute, log and relative difference; same length; Hamming distance on right-aligned digits; lowest and highest differing digit position; whether the first and last digits agree; whether one side's house number appears anywhere in the other's numbers; minimum absolute distance to any number on the other side.
 - **Retrieval / cascade context:** name and address cosines, their ranks in each search, the query's best cosines, gaps and margins, the stage-1 probability, its rank, and the query's max and sum.
 - **Query flags:** address missing, name in a non-Latin script, name is a domain, source (S2/S3), token counts.

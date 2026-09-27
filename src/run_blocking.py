@@ -8,9 +8,12 @@ import polars as pl
 from blocking import add_tokens, block
 
 
+COLS = ["entity_id", "country", "core", "alt", "ad", "nums", "skel", "pnum", "nonlat", "ad_empty"]
+
+
 def load(work, split):
-    s1 = pl.read_parquet(f"{work}/{split}_s1_norm.parquet")
-    q = pl.concat([pl.read_parquet(f"{work}/{split}_s2_norm.parquet"), pl.read_parquet(f"{work}/{split}_s3_norm.parquet")])
+    s1 = pl.read_parquet(f"{work}/{split}_s1_norm.parquet", columns=COLS)
+    q = pl.concat([pl.read_parquet(f"{work}/{split}_s{i}_norm.parquet", columns=COLS) for i in (2, 3)])
     return s1, q
 
 
@@ -19,10 +22,7 @@ def main(work, split, k, frac=1.0, tag=""):
     s1, q = load(work, split)
     if frac < 1.0:
         q = q.sample(fraction=frac, seed=0)
-    s1 = add_tokens(s1)
-    q = add_tokens(q)
-    print("tokens", round(time.time() - t), "s", flush=True)
-    cand = block(s1, q, log=lambda m: print(m, flush=True))
+    cand = block(s1, q, log=lambda m: print(m, flush=True), tokenize=add_tokens)
     cand.write_parquet(f"{work}/{split}_cand{tag}.parquet")
     q.select("entity_id").write_parquet(f"{work}/{split}_qids{tag}.parquet")
     print("pairs", cand.height, "time", round(time.time() - t), flush=True)

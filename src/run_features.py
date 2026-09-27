@@ -13,7 +13,8 @@ import lightgbm as lgb
 import numpy as np
 import polars as pl
 
-from features import Q_STR, S1_STR, STAGE1_FEATS, number_features, query_meta, stage1_features, string_features
+from features import (Q_STR, S1_STR, STAGE1_FEATS, diff_features, idf_tables, number_features, query_meta,
+                      stage1_features, string_features)
 
 TOP_M = 6
 
@@ -26,6 +27,7 @@ def main(work, split, stage1_model):
     qs = q.select(Q_STR)
     del q
     s1s = pl.read_parquet(f"{work}/{split}_s1_norm.parquet", columns=S1_STR)
+    idf = idf_tables(s1s)
     m1 = lgb.Booster(model_file=stage1_model)
     out = f"{work}/{split}_feat"
     os.makedirs(out, exist_ok=True)
@@ -43,7 +45,8 @@ def main(work, split, stage1_model):
         c = c.filter(pl.col("p1rk") <= TOP_M)
         c = c.with_columns(pl.col("p1").max().over("qi").alias("p1max"), pl.col("p1").sum().over("qi").alias("p1sum"))
         c = string_features(c, s1s, qs)
-        c = pl.concat([c, number_features(c.select("qi", "si"), s1s, qs)], how="horizontal")
+        c = pl.concat([c, number_features(c.select("qi", "si"), s1s, qs), diff_features(c.select("qi", "si"), s1s, qs, idf)],
+                      how="horizontal")
         c.write_parquet(dst)
         print(os.path.basename(p), c.height, round(time.time() - t1), "s", flush=True)
     print("done", round(time.time() - t), flush=True)

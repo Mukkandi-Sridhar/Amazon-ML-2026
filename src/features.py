@@ -18,8 +18,9 @@ def query_meta(q):
     )
 
 
+KEY_FLAGS = ["kf_core_pn", "kf_skel_pn", "kf_cat_pn", "kf_core", "kf_skel", "kf_cat"]
 STAGE1_FEATS = ["cos_n", "cos_a", "cos_c", "rk_n", "rk_a", "rk_c", "qmax_n", "qmax_a", "qmax_c", "gap_n", "gap_a",
-                "gap_c", "urk_c", "urk_n", "urk_a", "marg_c", "n_cand"] + QMETA_COLS
+                "gap_c", "urk_c", "urk_n", "urk_a", "marg_c", "n_cand", "n_keyed"] + KEY_FLAGS + QMETA_COLS
 
 
 def stage1_features(c, qmeta):
@@ -30,6 +31,7 @@ def stage1_features(c, qmeta):
         pl.col("cos_a").max().over("qi").alias("qmax_a"),
         pl.col("cos_c").max().over("qi").alias("qmax_c"),
         pl.len().over("qi").cast(pl.Int16).alias("n_cand"),
+        pl.sum_horizontal(KEY_FLAGS).cast(pl.Int8).alias("n_keyed"),
         pl.col("cos_c").rank("ordinal", descending=True).over("qi").cast(pl.Int16).alias("urk_c"),
         pl.col("cos_n").rank("ordinal", descending=True).over("qi").cast(pl.Int16).alias("urk_n"),
         pl.col("cos_a").rank("ordinal", descending=True).over("qi").cast(pl.Int16).alias("urk_a"),
@@ -198,4 +200,65 @@ def number_features(c, s1s, qs):
     out["pn_q_in_snums"] = tmp["pn_q_in_snums"].to_numpy()
     out["pn_s_in_qnums"] = tmp["pn_s_in_qnums"].to_numpy()
     out["nums_minabs"] = np.minimum(m, 1e7).astype(np.float32)
+    return pl.DataFrame(out)
+
+
+# ------------------------------------------------------------------ token differences
+# Which words differ between the two records, and how rare are they?  A rare
+# differing word ("Consultants" vs "Solutions") signals a different business;
+# common filler ("Services", "Center") or pure typos (compared on phonetic
+# skeletons) signal noise.  Legal forms are also exposed as small categorical
+# codes so the model can learn which legal-form changes are noise (LLC <-> L.L.C.)
+# and which mark a twin business (Corp -> Inc).
+DIFF_FEATS = ["dn_q", "dn_s", "dn_q_idf", "dn_s_idf", "dn_q_max", "dn_s_max", "dn_share_idf",
+              "da_q", "da_s", "da_q_idf", "da_s_idf", "da_q_max", "da_s_max", "da_share_idf", "lg_q", "lg_s"]
+LEGAL_CODES = ["", "llc", "inc", "corp", "ltd", "ltd pvt", "co", "lp", "llp", "pllc", "pc", "pa", "plc", "public ltd",
+               "sarl", "sas", "sasu", "sa", "eurl", "sci", "snc", "opc", "ltd opc pvt", "co inc", "co llc", "corp inc"]
+
+
+def idf_tables(s1s):
+    """IDF of skeleton name tokens and address words, computed on Source 1."""
+    n = s1s.height
+    out = {}
+    for col, name in (("skel", "n"), ("ad", "a")):
+        t = (s1s.select(pl.col(col).fill_null("").str.split(" ").list.unique().alias("t")).explode("t")
+             .filter(pl.col("t") != "").group_by("t").len())
+        out[name] = t.select("t", (np.log(n / pl.col("len"))).cast(pl.Float32).alias("idf"))
+    out["max_n"] = float(np.log(n))
+    return out
+
+
+def _diff_stats(a, b, idf, default):
+    """a, b: list series. Returns counts / idf sums / idf max of a-b, b-a and idf of shared tokens."""
+    da = a.list.set_difference(b)
+    db = b.list.set_difference(a)
+    sh = a.list.set_intersection(b)
+    res = {}
+    for key, s in (("q", da), ("s", db), ("share", sh)):
+        ex = pl.DataFrame({"t": s}).with_row_index("r").explode("t").drop_nulls()
+        ex = ex.filter(pl.col("t") != "").join(idf, on="t", how="left").with_columns(pl.col("idf").fill_null(default))
+        g = ex.group_by("r").agg(pl.col("idf").sum().alias("sum"), pl.col("idf").max().alias("max"), pl.len().alias("n"))
+        full = pl.DataFrame({"r": np.arange(len(a), dtype=np.uint32)}).join(g, on="r", how="left").sort("r").fill_null(0)
+        res[key] = full
+    return res
+
+
+def diff_features(c, s1s, qs, idf):
+    qi = c["qi"].to_numpy()
+    si = c["si"].to_numpy()
+    out = {}
+    split = lambda s: s.fill_null("").str.split(" ").list.eval(pl.element().filter(pl.element() != ""))
+    for col, p, tab in (("skel", "dn", idf["n"]), ("ad", "da", idf["a"])):
+        r = _diff_stats(split(qs[col].gather(qi)), split(s1s[col].gather(si)), tab, idf["max_n"])
+        out[f"{p}_q"] = r["q"]["n"].cast(pl.Int16).to_numpy()
+        out[f"{p}_s"] = r["s"]["n"].cast(pl.Int16).to_numpy()
+        out[f"{p}_q_idf"] = r["q"]["sum"].cast(pl.Float32).to_numpy()
+        out[f"{p}_s_idf"] = r["s"]["sum"].cast(pl.Float32).to_numpy()
+        out[f"{p}_q_max"] = r["q"]["max"].cast(pl.Float32).to_numpy()
+        out[f"{p}_s_max"] = r["s"]["max"].cast(pl.Float32).to_numpy()
+        out[f"{p}_share_idf"] = r["share"]["sum"].cast(pl.Float32).to_numpy()
+    code = {v: i for i, v in enumerate(LEGAL_CODES)}
+    other = len(LEGAL_CODES)
+    out["lg_q"] = qs["legal"].gather(qi).fill_null("").replace_strict(code, default=other).cast(pl.Int8).to_numpy()
+    out["lg_s"] = s1s["legal"].gather(si).fill_null("").replace_strict(code, default=other).cast(pl.Int8).to_numpy()
     return pl.DataFrame(out)

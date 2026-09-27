@@ -1,6 +1,6 @@
 """Train the stage-1 cascade model (cheap retrieval-score features).
 
-Uses a random 15% sample of train queries (seed 0).  Candidate sets of a
+Uses a random 8% sample of train queries (seed 0).  Candidate sets of a
 query do not depend on other queries (IDF is computed on Source 1 only), so
 the full-run blocking chunks already contain exactly the sample's candidates.
 Of the sampled queries, 40% are used for fitting and 30% for a recall report.
@@ -23,8 +23,8 @@ ROUNDS = 150
 def main(work, gt_path, out_model):
     qid = query_ids(work, "train")
     full = pl.DataFrame({"entity_id": qid}).with_row_index("qi").with_columns(pl.col("qi").cast(pl.Int32))
-    sample = full.sample(fraction=0.15, seed=0).with_row_index("local")
-    sample = sample.with_columns((pl.col("local") % 10).alias("mod")).select("qi", "mod")
+    sample = full.sample(fraction=0.08, seed=0).with_row_index("local")
+    sample = sample.with_columns((pl.col("local") % 10).alias("mod")).select("qi", "mod").filter(pl.col("mod") <= 6)
     q = pl.concat([pl.read_parquet(f"{work}/train_s{i}_norm.parquet", columns=["entity_id", "dom", "nonlat", "ad_empty", "core", "ad", "nums"]) for i in (2, 3)])
     qmeta = query_meta(q)
     del q
