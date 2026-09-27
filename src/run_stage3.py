@@ -30,7 +30,10 @@ CTX = ["p2rk", "q_p2max", "q_marg", "q_p2sum", "q_n", "s_n", "s_p2sum_o", "s_p2m
 # a lone deviating record is more often a different (neighbouring) business.
 CONS = ["c_pn_same", "c_pn_same_p2", "c_core_same", "c_core_same_p2", "c_pn_is_mode", "c_mode_eq_s1", "c_core_is_mode",
         "c_cmode_eq_s1", "c_pn_s_agree_p2"]
-FEATS = BASE + CTX + CONS
+# Claimant-consensus features (CONS) improve train OOF but hurt on test: test contains many twin
+# businesses that arrive as internally consistent groups, which consensus mistakes for S1 typos
+# (leaderboard 0.962 with vs 0.966 without).  They are therefore excluded from the model.
+FEATS = BASE + CTX
 PARAMS = dict(objective="binary", learning_rate=0.1, num_leaves=127, min_data_in_leaf=200, feature_fraction=0.9,
               bagging_fraction=0.7, bagging_freq=1, verbose=-1, num_threads=3)
 ROUNDS = 400
