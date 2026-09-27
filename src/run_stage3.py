@@ -1,0 +1,137 @@
+"""Stage-3 context model + assignment + submission writer.
+
+Stage-2 probabilities are aggregated per query (margin over the query's other
+candidates) and per Source-1 entity (how many other strong claims it has, where
+this pair ranks among them).  A second LightGBM (2-fold cross-fitted on train)
+re-scores every pair.  Each query is then assigned to its single best Source-1
+entity if the score clears a threshold tuned for macro F0.5 on train OOF.
+"""
+import glob
+import json
+import sys
+import time
+
+import lightgbm as lgb
+import numpy as np
+import polars as pl
+
+from common import query_ids, s1_ids, truth_pairs
+from metric import macro_f05
+
+BASE = ["p2", "p1", "cos_n", "cos_a", "n_tset", "a_tset", "pnum_eq", "num_cq", "sk_cat", "ad_empty", "src"]
+CTX = ["p2rk", "q_p2max", "q_marg", "q_p2sum", "q_n", "s_n", "s_p2sum_o", "s_p2max_o", "s_srk", "s_ntop_o",
+       "s_ntop_same_src_o", "s_top_p2mean_o", "is_qtop"]
+FEATS = BASE + CTX
+PARAMS = dict(objective="binary", learning_rate=0.1, num_leaves=127, min_data_in_leaf=200, feature_fraction=0.9,
+              bagging_fraction=0.7, bagging_freq=1, verbose=-1, num_threads=4)
+ROUNDS = 300
+
+
+def load(work, split):
+    return pl.concat([pl.read_parquet(p) for p in sorted(glob.glob(f"{work}/{split}_p2/part-*.parquet"))])
+
+
+def context(d):
+    d = d.with_columns(
+        pl.col("p2").rank("ordinal", descending=True).over("qi").cast(pl.Int16).alias("p2rk"),
+        pl.col("p2").max().over("qi").alias("q_p2max"),
+        pl.col("p2").sum().over("qi").alias("q_p2sum"),
+        pl.len().over("qi").cast(pl.Int16).alias("q_n"),
+    )
+    second = pl.col("p2").top_k(2).min().over("qi")
+    d = d.with_columns(
+        pl.when(pl.col("p2rk") == 1).then(pl.col("p2") - second).otherwise(pl.col("p2") - pl.col("q_p2max")).alias("q_marg"),
+        ((pl.col("p2rk") == 1) & (pl.col("p2") > 0.5)).cast(pl.Int8).alias("is_qtop"),
+    )
+    top = pl.col("is_qtop") == 1
+    d = d.with_columns(
+        pl.len().over("si").cast(pl.Int32).alias("s_n"),
+        (pl.col("p2").sum().over("si") - pl.col("p2")).alias("s_p2sum_o"),
+        pl.col("p2").rank("ordinal", descending=True).over("si").cast(pl.Int32).alias("s_srk"),
+        (pl.col("is_qtop").cast(pl.Int32).sum().over("si") - pl.col("is_qtop")).alias("s_ntop_o"),
+        (pl.col("is_qtop").cast(pl.Int32).sum().over(["si", "src"]) - pl.col("is_qtop")).alias("s_ntop_same_src_o"),
+        ((pl.when(top).then(pl.col("p2")).otherwise(0.0).sum().over("si") - pl.when(top).then(pl.col("p2")).otherwise(0.0))
+         / pl.max_horizontal(pl.col("is_qtop").cast(pl.Int32).sum().over("si") - pl.col("is_qtop"), 1)).alias("s_top_p2mean_o"),
+    )
+    # best score among the *other* rows of the same S1 entity
+    g = d.group_by("si").agg(pl.col("p2").max().alias("_m1"), pl.col("p2").top_k(2).min().alias("_m2"))
+    d = d.join(g, on="si", how="left")
+    d = d.with_columns(
+        pl.when(pl.col("s_n") == 1).then(0.0).when(pl.col("p2") >= pl.col("_m1")).then(pl.col("_m2"))
+        .otherwise(pl.col("_m1")).alias("s_p2max_o")).drop("_m1", "_m2")
+    return d
+
+
+def assign(d, score, thr):
+    best = d.sort(score, descending=True).group_by("qi", maintain_order=True).first()
+    return best.filter(pl.col(score) > thr).select("si", "qi")
+
+
+def tune(work, gt_path):
+    t = time.time()
+    d = context(load(work, "train"))
+    print("context", d.shape, round(time.time() - t), flush=True)
+    p3 = np.zeros(d.height, dtype=np.float32)
+    fold = (d["qi"].to_numpy() % 2)
+    sub = ((d["qi"].to_numpy() // 2) % 5 == 0)
+    X = d.select(FEATS).to_numpy().astype(np.float32)
+    y = d["y"].to_numpy()
+    for k in (0, 1):
+        tr = (fold != k) & sub
+        m = lgb.train(PARAMS, lgb.Dataset(X[tr], y[tr]), ROUNDS)
+        m.save_model(f"{work}/stage3_fold{k}.txt")
+        p3[fold == k] = m.predict(X[fold == k])
+        print(f"stage3 fold {k} done {time.time()-t:.0f}s", flush=True)
+    del X
+    d = d.with_columns(pl.Series("p3", p3))
+    d.select("qi", "si", "p2", "p3", "y").write_parquet(f"{work}/train_oof.parquet")
+    truth = truth_pairs(work, gt_path)
+    uni = pl.Series(np.arange(len(s1_ids(work, "train")), dtype=np.int32))
+    found = d.filter(pl.col("y") == 1).height
+    print(f"truth pairs {truth.height}, in candidates {found} ({found/truth.height:.4f})")
+    best = {}
+    for score in ("p2", "p3"):
+        res = []
+        for thr in [0.2, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.8]:
+            f, _ = macro_f05(assign(d, score, thr), truth, uni)
+            res.append((f, thr))
+            print(f"{score} thr={thr:.2f} macroF0.5={f:.5f}", flush=True)
+        best[score] = max(res)
+    print("best", best)
+    json.dump({"score": "p3", "thr": best["p3"][1], "oof_f05": best["p3"][0], "oof_f05_p2": best["p2"][0]},
+              open(f"{work}/threshold.json", "w"))
+
+
+def write_outputs(work, split, out_dir, raw_s1_path):
+    """Predict with stage-3 fold models, assign and write both submission files."""
+    import os
+    cfg = json.load(open(f"{work}/threshold.json"))
+    d = context(load(work, split))
+    X = d.select(FEATS).to_numpy().astype(np.float32)
+    ms = [lgb.Booster(model_file=f"{work}/stage3_fold{k}.txt") for k in (0, 1)]
+    d = d.with_columns(pl.Series("p3", ((ms[0].predict(X) + ms[1].predict(X)) / 2).astype(np.float32)))
+    del X
+    qid = query_ids(work, split)
+    sid = s1_ids(work, split)
+    pred = assign(d, cfg["score"], cfg["thr"])
+    os.makedirs(out_dir, exist_ok=True)
+    s1_order = pl.read_csv(raw_s1_path, separator="\t", quote_char=None, infer_schema=False, columns=["entity_id"])
+    s1_order = s1_order.rename({"entity_id": "source1_entity_id"})
+
+    def to_rows(pairs, col):
+        g = (pairs.with_columns(pl.Series("q", qid).gather(pairs["qi"]).alias("q"),
+                                pl.Series("s", sid).gather(pairs["si"]).alias("source1_entity_id"))
+             .sort("q").group_by("source1_entity_id").agg(pl.col("q").unique(maintain_order=True).str.join(",").alias(col)))
+        return s1_order.join(g, on="source1_entity_id", how="left").with_columns(pl.col(col).fill_null(""))
+
+    to_rows(pred, "matched_entity_ids").write_csv(f"{out_dir}/matching_results.tsv", separator="\t", quote_style="never")
+    to_rows(d.select("si", "qi"), "candidate_entity_ids").write_csv(f"{out_dir}/candidate_pairs.tsv", separator="\t", quote_style="never")
+    d.select("qi", "si", "p2", "p3").write_parquet(f"{work}/{split}_scores.parquet")
+    print("written", pred.height, "matches for", pred["si"].n_unique(), "S1 entities")
+
+
+if __name__ == "__main__":
+    if sys.argv[1] == "tune":
+        tune(sys.argv[2], sys.argv[3])
+    else:
+        write_outputs(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
