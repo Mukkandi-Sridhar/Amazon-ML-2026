@@ -3,3 +3,6 @@ __pycache__/
 work/
 dataset/
 *.parquet
+*.tsv
+!submissions/**/*.tsv.gz
+output/
