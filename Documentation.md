@@ -70,7 +70,14 @@ TSV ─► normalise (names, addresses, transliteration, skeletons)
 
 `country` is deliberately **not** a feature, so France is scored with the same country-agnostic model.
 
-**Stage-3 context features:** stage-2 probability; its rank within the query; the query's max, sum and margin over its runner-up; the number of candidates. Per S1 entity, excluding the current pair: sum and max of the other pairs' probabilities, this pair's rank among them, how many *other* queries have this entity as their confident top choice (overall and from the same source), and their mean confidence.
+**Name-ambiguity features (stage 2):** how many S1 records in the same country share the query's (and the candidate's) exact core name and phonetic skeleton. A unique name makes a name-only match safe; "Midwest Coalition" occurs 21 times in train S1.
+
+**Stage-3 context features:**
+- *Query level:* stage-2 probability; its rank within the query; the query's max, sum and margin over its runner-up; the number of candidates.
+- *Entity level (excluding the current pair):* sum and max of the other pairs' probabilities; this pair's rank among them; how many *other* queries have this entity as their confident top choice (overall and from the same source); their mean confidence.
+- *Claimant consensus:* how many other claimants of the same S1 entity share this query's house number and core name, raw and probability-weighted; whether the query carries the entity's majority (probability-weighted) house number and name; whether that majority agrees with Source 1.
+
+  Why this matters: when several independent S2/S3 records agree on a value that differs from Source 1, it is usually Source 1 that carries the typo. Among true matches whose house number disagrees with S1, 45% have another claimant with the same number, versus 7.7% for false merges. Without these features, a context model penalises every 5th or 6th claimant of an entity (a cluster-size prior) even when all of them agree perfectly.
 
 **Model type:** LightGBM gradient-boosted trees (binary log-loss) at every stage:
 - Stage 2: 255 leaves, 500 rounds, learning rate 0.1.
@@ -78,7 +85,9 @@ TSV ─► normalise (names, addresses, transliteration, skeletons)
 
 Stages 2 and 3 are **2-fold cross-fitted** by query on train. Every training pair gets an out-of-fold probability, and the two fold models are averaged for test.
 
-**Threshold selection method:** each query is assigned to its highest-scoring candidate. The assignment is kept when p₃ > τ, and τ is chosen by grid search to maximise the **exact competition metric** (macro F0.5 over *all* 2.2M train S1 entities, singletons included) on out-of-fold predictions.
+**Decision rule / threshold selection:** each query is assigned to its highest-scoring candidate. Two rules are evaluated with the **exact competition metric** (macro F0.5 over *all* 2.2M train S1 entities, singletons included) on out-of-fold predictions, and the better one is used:
+1. A global threshold τ on p₃, chosen by grid search.
+2. Per-entity **expected-F0.5 maximisation.** Each entity's claimants are sorted by p₃, and the prefix length k maximising 1.25·Σ_{i≤k}p_i / (0.25·(Σ_i p_i + c) + k) is kept. k = 0 ("no match") is chosen when P(no true match) = Π(1−p_i)·e^{−c} is larger. The constant c is tuned on OOF.
 
 ---
 
