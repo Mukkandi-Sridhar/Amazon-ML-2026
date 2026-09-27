@@ -18,7 +18,7 @@ from features import NUM_FEATS, STAGE1_FEATS, STR_FEATS
 FEATS = STAGE1_FEATS + ["p1", "p1rk", "p1max", "p1sum"] + STR_FEATS + NUM_FEATS
 KEEP = ["qi", "si", "src", "p1", "cos_n", "cos_a", "n_tset", "a_tset", "pnum_eq", "num_cq", "sk_cat", "ad_empty"]
 PARAMS = dict(objective="binary", learning_rate=0.1, num_leaves=255, min_data_in_leaf=100, feature_fraction=0.8,
-              bagging_fraction=0.7, bagging_freq=1, lambda_l2=1.0, verbose=-1, num_threads=4)
+              bagging_fraction=0.7, bagging_freq=1, lambda_l2=1.0, verbose=-1, num_threads=3)
 ROUNDS = 500
 
 
@@ -48,19 +48,26 @@ def train(work, gt_path, sample_mod=10):
     return models
 
 
+PRED_KW = dict(pred_early_stop=True, pred_early_stop_freq=25, pred_early_stop_margin=10.0, num_threads=4)
+
+
 def predict(work, split, models, gt_path=None):
     out = f"{work}/{split}_p2"
     os.makedirs(out, exist_ok=True)
     truth = truth_pairs(work, gt_path).with_columns(pl.lit(1, pl.Int8).alias("y")) if split == "train" else None
     for p in sorted(glob.glob(f"{work}/{split}_feat/part-*.parquet")):
+        if os.path.exists(f"{out}/{os.path.basename(p)}"):
+            continue
         t = time.time()
         d = pl.read_parquet(p, columns=list(dict.fromkeys(KEEP + FEATS)))
         X = d.select(FEATS).to_numpy().astype(np.float32)
         if split == "train":
             f = fold_of(d["qi"].to_numpy())
-            p2 = np.where(f == 0, models[0].predict(X), models[1].predict(X))
+            p2 = np.empty(len(X), dtype=np.float64)
+            for k in (0, 1):
+                p2[f == k] = models[k].predict(X[f == k], **PRED_KW)
         else:
-            p2 = (models[0].predict(X) + models[1].predict(X)) / 2
+            p2 = (models[0].predict(X, **PRED_KW) + models[1].predict(X, **PRED_KW)) / 2
         d = d.select(KEEP).with_columns(pl.Series("p2", p2.astype(np.float32)))
         if truth is not None:
             d = d.join(truth, on=["qi", "si"], how="left").with_columns(pl.col("y").fill_null(0))

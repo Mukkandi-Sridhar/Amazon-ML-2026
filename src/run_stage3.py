@@ -23,12 +23,21 @@ CTX = ["p2rk", "q_p2max", "q_marg", "q_p2sum", "q_n", "s_n", "s_p2sum_o", "s_p2m
        "s_ntop_same_src_o", "s_top_p2mean_o", "is_qtop"]
 FEATS = BASE + CTX
 PARAMS = dict(objective="binary", learning_rate=0.1, num_leaves=127, min_data_in_leaf=200, feature_fraction=0.9,
-              bagging_fraction=0.7, bagging_freq=1, verbose=-1, num_threads=4)
+              bagging_fraction=0.7, bagging_freq=1, verbose=-1, num_threads=3)
 ROUNDS = 300
 
 
+P2_MIN = 1e-3  # pairs below this stage-2 probability are never assigned; dropping them keeps stage 3 in memory
+
+
 def load(work, split):
-    return pl.concat([pl.read_parquet(p) for p in sorted(glob.glob(f"{work}/{split}_p2/part-*.parquet"))])
+    cols = ["qi", "si", "y"] + BASE if split == "train" else ["qi", "si"] + BASE
+    return pl.concat([pl.read_parquet(p, columns=cols).filter(pl.col("p2") >= P2_MIN)
+                      for p in sorted(glob.glob(f"{work}/{split}_p2/part-*.parquet"))])
+
+
+def all_pairs(work, split):
+    return pl.concat([pl.read_parquet(p, columns=["qi", "si"]) for p in sorted(glob.glob(f"{work}/{split}_p2/part-*.parquet"))])
 
 
 def context(d):
@@ -125,8 +134,9 @@ def write_outputs(work, split, out_dir, raw_s1_path):
         return s1_order.join(g, on="source1_entity_id", how="left").with_columns(pl.col(col).fill_null(""))
 
     to_rows(pred, "matched_entity_ids").write_csv(f"{out_dir}/matching_results.tsv", separator="\t", quote_style="never")
-    to_rows(d.select("si", "qi"), "candidate_entity_ids").write_csv(f"{out_dir}/candidate_pairs.tsv", separator="\t", quote_style="never")
     d.select("qi", "si", "p2", "p3").write_parquet(f"{work}/{split}_scores.parquet")
+    del d
+    to_rows(all_pairs(work, split), "candidate_entity_ids").write_csv(f"{out_dir}/candidate_pairs.tsv", separator="\t", quote_style="never")
     print("written", pred.height, "matches for", pred["si"].n_unique(), "S1 entities")
 
 
