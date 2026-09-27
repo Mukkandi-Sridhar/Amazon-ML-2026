@@ -66,7 +66,12 @@ TSV ─► normalise (names, addresses, transliteration, skeletons)
     Which key matched is passed on as a flag.
   - The union gives ≈24 candidates per query. On a 15% query sample, adding bigrams and keys raised union recall from 97.57% to **97.88%** (Indic-script India records: 92.9% → **95.3%**).
 - **Stage-1 cascade:** a small LightGBM (63 leaves, 150 trees) over 30 cheap features, including the exact-key flags (both channel cosines, per-channel ranks, gap to the query's best, margin to the runner-up, query flags). It keeps the **top 6** candidates per query. This final set is what the matching models see, and it is written to `candidate_pairs.tsv`.
-- **Candidate pairs generated:** train ≈ 245M retrieved → **61.9M** after the cascade; test ≈ 228M → **59.8M** after the cascade.
+- **Candidate set = final model input.** Candidate generation is a cascade, and `candidate_pairs.tsv` is its *last* stage, i.e. exactly the pairs the final (stage-3) model scores:
+  1. retrieval: three TF-IDF top-K passes plus exact keys, ≈24 candidates per S2/S3 record;
+  2. cascade filter 1: cheap LightGBM on retrieval scores, top-8 per record;
+  3. cascade filter 2: pairwise LightGBM, stage-2 probability ≥ 0.05.
+
+  The result is **≈3.6 candidates per Source-1 entity** on test (v4: 3.87 with cut-off 0.01). This is a reduction ratio of > 99.9999% versus all same-country pairs, while keeping **97.45% of all true train pairs**. Raising the cut-off from 0.01 to 0.05 shrinks the set by 7% with no change in OOF macro F0.5 (0.98412 → 0.98413): pairs below it are essentially never accepted.
 - **How true matches were not lost** (measured on train):
   - Retrieval union recall is **97.57%** of all true pairs (99.74% for US records that have an address).
   - The cascade keeps **99.41%** of the retrieved true pairs in the top 6, for an overall recall ceiling of **≈97.0%**.
