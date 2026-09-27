@@ -54,7 +54,7 @@ def fold_of(qi):
     return qi % 2
 
 
-def train(work, gt_path, sample_mod=4):
+def train(work, gt_path, sample_mod=5):
     truth = truth_pairs(work, gt_path).with_columns(pl.lit(1, pl.Int8).alias("y"))
     amb = ambiguity(work, "train")
     parts = sorted(glob.glob(f"{work}/train_feat/part-*.parquet"))
