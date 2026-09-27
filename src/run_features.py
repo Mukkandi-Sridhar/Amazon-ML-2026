@@ -16,7 +16,7 @@ import polars as pl
 from features import (Q_STR, S1_STR, STAGE1_FEATS, diff_features, idf_tables, number_features, query_meta,
                       stage1_features, string_features)
 
-TOP_M = 6
+TOP_M = 8
 
 
 def main(work, split, stage1_model):

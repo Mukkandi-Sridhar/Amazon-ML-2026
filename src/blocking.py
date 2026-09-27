@@ -48,7 +48,11 @@ def add_tokens(df):
     # address bigrams: consecutive normalised address words (common Indian address words become specific in pairs)
     bg = (pl.col("ad").fill_null("").str.split(" ").list.eval(pl.element().filter(pl.element() != ""))
           .list.eval(("b:" + pl.element() + "_" + pl.element().shift(-1)).drop_nulls()))
-    atok = pl.concat_list([a, d, bg]).list.unique()
+    # house number x address word: an alias-named record at the same house number + street still retrieves its entity
+    pnw = [["x:" + p + "_" + w for w in (a_ or "").split(" ") if len(w) >= 3] if p else []
+           for p, a_ in zip(df["pnum"].fill_null("").to_list(), df["ad"].fill_null("").to_list())]
+    df = df.with_columns(pl.Series("_pnw", pnw, dtype=pl.List(pl.String)))
+    atok = pl.concat_list([a, d, bg, pl.col("_pnw")]).list.unique()
     pn = pl.col("pnum").fill_null("")
     ok = pn != ""
     df = df.with_columns(
@@ -60,7 +64,7 @@ def add_tokens(df):
         pl.when(pl.col("_skel") != "").then(pl.col("_skel")).alias("key_skel"),
         pl.when(pl.col("_cskel").str.len_chars() >= 4).then(pl.col("_cskel")).alias("key_cat"),
     )
-    return df.drop("_cskel", "_skel")
+    return df.drop("_cskel", "_skel", "_pnw")
 
 
 def _csr(tok_series, vocab_df, n_rows):
