@@ -28,6 +28,14 @@ EDA findings on the 2.2M / 5.0M / 5.3M training records (S1 / S2 / S3):
 | Address noise: component reordering, abbreviations (`Ct`/`Court`, `R.`/`Rue`), state code ↔ name, city variants (`Richmond City`, `City Of Superior`, `Chna Grove`), `PO Box`/`PMB`/`null`/`N/A` insertions, leading zeros (`00380`), unit suffixes (`9616-C`), missing address (3.4%). | Order-free token bags, number extraction with zero stripping, state canonicalisation, filler removal. |
 | **Hard negatives**: neighbouring businesses whose house number differs by a small amount in the *last* digit (`7344` vs `7342 Lambton Green`), while true matches show typo-style digit errors, often in the *leading* digit (`509` vs `409 Hickory Lane`). | House-number geometry features (numeric difference, which digit differs). |
 
+**Transliteration details that mattered:**
+- Malayalam chillu letters are expanded before `unidecode`.
+- Tamil `ச` is rendered as `s` (it is `c` in `unidecode` but pronounced "s", as in "South" and "Consulting").
+- The skeleton merges voiced/unvoiced consonants, drops vowels, `h`, `y` and final `-g` (so "-ing" = "-in"), and treats soft `c`/`g` and silent `gh` as English does.
+- Transliterated legal words ("limittett", "praaivett", "elelpi") are recognised through their skeletons.
+
+With these rules, e.g., `ராயல் ஈஸ்டர்ன் டிரேடிங் பிரைவேட் லிமிடெட்` and "Royal Eastern Trading Private Limited" both reduce to `rl strn trtn` + legal `ltd pvt`.
+
 ### 2.2 Solution Strategy
 
 **Approach Type:** Blocking (sparse retrieval) → 3-stage LightGBM cascade → constrained assignment
