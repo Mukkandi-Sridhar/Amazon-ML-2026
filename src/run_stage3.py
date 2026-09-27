@@ -18,13 +18,15 @@ import polars as pl
 from common import query_ids, s1_ids, truth_pairs
 from metric import macro_f05
 
-BASE = ["p2", "p1", "cos_n", "cos_a", "n_tset", "a_tset", "pnum_eq", "num_cq", "sk_cat", "ad_empty", "src"]
+BASE = ["p2", "p1", "cos_n", "cos_a", "n_tset", "a_tset", "pnum_eq", "num_cq", "sk_cat", "ad_empty", "src",
+        "n_ratio", "nm_tset", "sk_ratio", "a_ratio", "num_tset", "pn_absdiff", "pn_highdiff_rel", "pn_lowdiff", "st_eq",
+        "city_ratio", "q_nnum", "s_nnum", "nonlat", "dom", "s_core_cnt", "s_skel_cnt", "q_core_cnt", "q_skel_cnt"]
 CTX = ["p2rk", "q_p2max", "q_marg", "q_p2sum", "q_n", "s_n", "s_p2sum_o", "s_p2max_o", "s_srk", "s_ntop_o",
        "s_ntop_same_src_o", "s_top_p2mean_o", "is_qtop"]
 FEATS = BASE + CTX
 PARAMS = dict(objective="binary", learning_rate=0.1, num_leaves=127, min_data_in_leaf=200, feature_fraction=0.9,
               bagging_fraction=0.7, bagging_freq=1, verbose=-1, num_threads=3)
-ROUNDS = 300
+ROUNDS = 400
 
 
 P2_MIN = 1e-3  # pairs below this stage-2 probability are never assigned; dropping them keeps stage 3 in memory
@@ -76,13 +78,40 @@ def assign(d, score, thr):
     return best.filter(pl.col(score) > thr).select("si", "qi")
 
 
+def assign_expf(d, score, c=0.0, low=0.05):
+    """Per-entity expected-F0.5 maximisation.
+
+    Every query first picks its best Source-1 entity.  For each entity, its claimants
+    are sorted by probability and the prefix length k maximising the plug-in
+    expected F0.5 = 1.25*sum_{i<=k} p_i / (0.25*(sum_i p_i + c) + k) is kept; k = 0
+    (predict "no match") is chosen when P(no true match) = prod(1-p_i)*exp(-c) is larger.
+    `c` is the expected number of true matches the candidates missed.
+    """
+    b = (d.sort(score, descending=True).group_by("qi", maintain_order=True).first()
+         .select("qi", "si", pl.col(score).alias("p")).filter(pl.col("p") > low)
+         .sort(["si", "p"], descending=[False, True]))
+    b = b.with_columns(pl.col("p").cum_sum().over("si").alias("ctp"), pl.col("p").cum_count().over("si").alias("k"),
+                       pl.col("p").sum().over("si").alias("S"), (1 - pl.col("p")).log().sum().over("si").alias("lp0"))
+    b = b.with_columns((1.25 * pl.col("ctp") / (0.25 * (pl.col("S") + c) + pl.col("k"))).alias("ef"),
+                       (pl.col("lp0").exp() * np.exp(-c)).alias("ef0"))
+    kb = b.group_by("si").agg(pl.col("ef").arg_max().alias("am"), pl.col("ef").max().alias("efm"), pl.col("ef0").first())
+    kb = kb.with_columns(pl.when(pl.col("efm") > pl.col("ef0")).then(pl.col("am") + 1).otherwise(0).alias("kstar"))
+    return b.join(kb.select("si", "kstar"), on="si").filter(pl.col("k") <= pl.col("kstar")).select("si", "qi")
+
+
+def decide(d, cfg):
+    if cfg.get("rule") == "expf":
+        return assign_expf(d, cfg["score"], cfg["c"])
+    return assign(d, cfg["score"], cfg["thr"])
+
+
 def tune(work, gt_path):
     t = time.time()
     d = context(load(work, "train"))
     print("context", d.shape, round(time.time() - t), flush=True)
     p3 = np.zeros(d.height, dtype=np.float32)
     fold = (d["qi"].to_numpy() % 2)
-    sub = ((d["qi"].to_numpy() // 2) % 5 == 0)
+    sub = ((d["qi"].to_numpy() // 2) % 2 == 0)
     X = d.select(FEATS).to_numpy().astype(np.float32)
     y = d["y"].to_numpy()
     for k in (0, 1):
@@ -101,14 +130,20 @@ def tune(work, gt_path):
     best = {}
     for score in ("p2", "p3"):
         res = []
-        for thr in [0.2, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.8]:
+        for thr in [0.3, 0.4, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85]:
             f, _ = macro_f05(assign(d, score, thr), truth, uni)
             res.append((f, thr))
             print(f"{score} thr={thr:.2f} macroF0.5={f:.5f}", flush=True)
         best[score] = max(res)
     print("best", best)
-    json.dump({"score": "p3", "thr": best["p3"][1], "oof_f05": best["p3"][0], "oof_f05_p2": best["p2"][0]},
-              open(f"{work}/threshold.json", "w"))
+    cfg = {"rule": "thr", "score": "p3", "thr": best["p3"][1], "oof_f05": best["p3"][0], "oof_f05_p2": best["p2"][0]}
+    for c in (0.0, 0.1, 0.2):
+        f, _ = macro_f05(assign_expf(d, "p3", c), truth, uni)
+        print(f"p3 expected-F rule c={c} macroF0.5={f:.5f}", flush=True)
+        if f > cfg["oof_f05"]:
+            cfg.update({"rule": "expf", "c": c, "oof_f05": f})
+    print("chosen", cfg)
+    json.dump(cfg, open(f"{work}/threshold.json", "w"))
 
 
 def write_outputs(work, split, out_dir, raw_s1_path):
@@ -122,7 +157,7 @@ def write_outputs(work, split, out_dir, raw_s1_path):
     del X
     qid = query_ids(work, split)
     sid = s1_ids(work, split)
-    pred = assign(d, cfg["score"], cfg["thr"])
+    pred = decide(d, cfg)
     os.makedirs(out_dir, exist_ok=True)
     s1_order = pl.read_csv(raw_s1_path, separator="\t", quote_char=None, infer_schema=False, columns=["entity_id"])
     s1_order = s1_order.rename({"entity_id": "source1_entity_id"})
