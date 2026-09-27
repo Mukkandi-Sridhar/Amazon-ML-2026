@@ -10,8 +10,8 @@ from blocking import add_tokens, block
 
 def main(work, split):
     t = time.time()
-    s1 = pl.read_parquet(f"{work}/{split}_s1_norm.parquet", columns=["entity_id", "country", "core", "alt", "ad", "nums"])
-    q = pl.concat([pl.read_parquet(f"{work}/{split}_s{i}_norm.parquet", columns=["entity_id", "country", "core", "alt", "ad", "nums"])
+    s1 = pl.read_parquet(f"{work}/{split}_s1_norm.parquet", columns=["entity_id", "country", "core", "alt", "ad", "nums", "skel", "pnum"])
+    q = pl.concat([pl.read_parquet(f"{work}/{split}_s{i}_norm.parquet", columns=["entity_id", "country", "core", "alt", "ad", "nums", "skel", "pnum"])
                    for i in (2, 3)])
     print("loaded", round(time.time() - t), flush=True)
     out = f"{work}/{split}_cand"

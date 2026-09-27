@@ -13,13 +13,15 @@ import numpy as np
 import polars as pl
 
 from common import truth_pairs
-from features import NUM_FEATS, STAGE1_FEATS, STR_FEATS
+from features import DIFF_FEATS, NUM_FEATS, STAGE1_FEATS, STR_FEATS
 
 AMB_FEATS = ["s_core_cnt", "s_skel_cnt", "q_core_cnt", "q_skel_cnt"]
-FEATS = STAGE1_FEATS + ["p1", "p1rk", "p1max", "p1sum"] + STR_FEATS + NUM_FEATS + AMB_FEATS
+FEATS = STAGE1_FEATS + ["p1", "p1rk", "p1max", "p1sum"] + STR_FEATS + NUM_FEATS + DIFF_FEATS + AMB_FEATS
+CATEGORICAL = [FEATS.index("lg_q"), FEATS.index("lg_s")]
 KEEP = ["qi", "si", "src", "p1", "cos_n", "cos_a", "n_tset", "a_tset", "pnum_eq", "num_cq", "sk_cat", "ad_empty",
         "n_ratio", "nm_tset", "sk_ratio", "a_ratio", "num_tset", "pn_absdiff", "pn_highdiff_rel", "pn_lowdiff", "st_eq",
-        "city_ratio", "q_nnum", "s_nnum", "nonlat", "dom"] + AMB_FEATS
+        "city_ratio", "q_nnum", "s_nnum", "nonlat", "dom", "dn_q_idf", "dn_s_idf", "da_q_idf", "da_s_idf", "lg_q", "lg_s",
+        "n_keyed"] + AMB_FEATS
 
 
 def ambiguity(work, split):
@@ -66,7 +68,8 @@ def train(work, gt_path, sample_mod=4):
             rows.append(add_amb(d, amb))
         d = pl.concat(rows).join(truth, on=["qi", "si"], how="left").with_columns(pl.col("y").fill_null(0))
         print(f"fold {k}: train rows {d.height} pos {d['y'].sum()}", flush=True)
-        ds = lgb.Dataset(d.select(FEATS).to_numpy().astype(np.float32), d["y"].to_numpy(), free_raw_data=True)
+        ds = lgb.Dataset(d.select(FEATS).to_numpy().astype(np.float32), d["y"].to_numpy(), free_raw_data=True,
+                         categorical_feature=CATEGORICAL)
         del d
         m = lgb.train(PARAMS, ds, ROUNDS)
         m.save_model(f"{work}/stage2_fold{k}.txt")

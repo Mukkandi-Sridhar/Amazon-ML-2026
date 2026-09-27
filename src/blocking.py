@@ -43,8 +43,24 @@ def add_tokens(df):
     a = pl.col("ad").str.split(" ").list.eval(pl.element().filter(pl.element().str.len_chars() >= 3)).list.eval("a:" + pl.element())
     d = pl.col("nums").str.split(" ").list.eval(pl.element().filter(pl.element().str.len_chars() >= 1)).list.eval("d:" + pl.element())
     ntok = pl.concat_list([w, k, aw, ak, c]).list.unique().list.eval(pl.element().filter(pl.element().str.len_chars() > 2))
-    atok = pl.concat_list([a, d]).list.unique()
-    return df.with_columns(ntok.alias("ntok"), atok.alias("atok"))
+    df = df.with_columns(ntok.alias("ntok"), pl.col("core").replace_strict(cmap, default="").alias("_cskel"),
+                         pl.col("skel").fill_null("").alias("_skel"))
+    # address bigrams: consecutive normalised address words (common Indian address words become specific in pairs)
+    bg = (pl.col("ad").fill_null("").str.split(" ").list.eval(pl.element().filter(pl.element() != ""))
+          .list.eval(("b:" + pl.element() + "_" + pl.element().shift(-1)).drop_nulls()))
+    atok = pl.concat_list([a, d, bg]).list.unique()
+    pn = pl.col("pnum").fill_null("")
+    ok = pn != ""
+    df = df.with_columns(
+        atok.alias("atok"),
+        pl.when(ok & (pl.col("core") != "")).then(pl.col("core") + "|" + pn).alias("key_core_pn"),
+        pl.when(ok & (pl.col("_skel") != "")).then(pl.col("_skel") + "|" + pn).alias("key_skel_pn"),
+        pl.when(ok & (pl.col("_cskel") != "")).then(pl.col("_cskel") + "|" + pn).alias("key_cat_pn"),
+        pl.when(pl.col("core") != "").then(pl.col("core")).alias("key_core"),
+        pl.when(pl.col("_skel") != "").then(pl.col("_skel")).alias("key_skel"),
+        pl.when(pl.col("_cskel").str.len_chars() >= 4).then(pl.col("_cskel")).alias("key_cat"),
+    )
+    return df.drop("_cskel", "_skel")
 
 
 def _csr(tok_series, vocab_df, n_rows):
@@ -81,6 +97,22 @@ def _rowdot(A, B, ai, bi):
     return out
 
 
+KEYS = {  # key column -> max number of Source-1 records sharing the key for it to be used
+    "key_core_pn": 50, "key_skel_pn": 50, "key_cat_pn": 50, "key_core": 10, "key_skel": 10, "key_cat": 10}
+KEY_FLAGS = ["kf_" + k[4:] for k in KEYS]
+
+
+def _keyed(qs, s1c, key_frames):
+    """Exact-key candidates for a chunk of queries: (r, c, kf_* flags)."""
+    out = None
+    for k, g in key_frames.items():
+        qk = qs.select(pl.col(k)).with_row_index("r").drop_nulls()
+        m = qk.join(g, on=k, how="inner").select(pl.col("r").cast(pl.Int32), pl.col("c").cast(pl.Int32),
+                                                   pl.lit(1, pl.Int8).alias("kf_" + k[4:]))
+        out = m if out is None else out.join(m, on=["r", "c"], how="full", coalesce=True)
+    return out.with_columns([pl.col(f).fill_null(0) for f in KEY_FLAGS])
+
+
 def block(s1, q, kn=10, ka=10, kc=15, max_df_frac=0.01, min_max_df=2000, chunk=400_000, threads=4, log=print, sink=None,
           tokenize=None):
     """s1, q: normalised frames (with `ntok`/`atok`, or raw fields plus a `tokenize` callable applied lazily per
@@ -103,6 +135,11 @@ def block(s1, q, kn=10, ka=10, kc=15, max_df_frac=0.01, min_max_df=2000, chunk=4
         SA = _csr(s1c["atok"], va, n)
         SNT, SAT = SN.T.tocsr(), SA.T.tocsr()
         SCT = (sp.hstack([SN, SA]).tocsr() * np.float32(1 / np.sqrt(2))).T.tocsr()
+        key_frames = {}
+        for k, cap in KEYS.items():
+            g = s1c.select(pl.col(k)).with_row_index("c").drop_nulls()
+            g = g.with_columns(pl.len().over(k).alias("_n")).filter(pl.col("_n") <= cap).drop("_n")
+            key_frames[k] = g
         log(f"  [{country}] S1={n} Q={len(qc_idx)} vocab n={vn.height} a={va.height} build={time.time()-t0:.0f}s")
         for i in range(0, len(qc_idx), chunk):
             t1 = time.time()
@@ -117,6 +154,8 @@ def block(s1, q, kn=10, ka=10, kc=15, max_df_frac=0.01, min_max_df=2000, chunk=4
             pa = _topk(QA, SAT, ka, threads).rename({"rk": "rk_a"})
             pc = _topk(QC, SCT, kc, threads).rename({"rk": "rk_c"})
             u = pc.join(pn, on=["r", "c"], how="full", coalesce=True).join(pa, on=["r", "c"], how="full", coalesce=True)
+            u = u.join(_keyed(qs, s1c, key_frames), on=["r", "c"], how="full", coalesce=True)
+            u = u.with_columns([pl.col(f).fill_null(0) for f in KEY_FLAGS])
             r = u["r"].to_numpy()
             c = u["c"].to_numpy()
             cos_n = _rowdot(QN, SN, r, c)
@@ -125,7 +164,7 @@ def block(s1, q, kn=10, ka=10, kc=15, max_df_frac=0.01, min_max_df=2000, chunk=4
                 "qi": qi[r].astype(np.int32), "si": s1c_idx[c].astype(np.int32),
                 "cos_n": cos_n, "cos_a": cos_a,
                 "rk_n": u["rk_n"].fill_null(99).cast(pl.Int16), "rk_a": u["rk_a"].fill_null(99).cast(pl.Int16),
-                "rk_c": u["rk_c"].fill_null(99).cast(pl.Int16)})
+                "rk_c": u["rk_c"].fill_null(99).cast(pl.Int16)}).with_columns([u[f].cast(pl.Int8) for f in KEY_FLAGS])
             if sink is not None:
                 sink(res)
             else:
