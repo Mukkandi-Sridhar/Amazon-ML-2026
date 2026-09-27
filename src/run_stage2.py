@@ -48,6 +48,10 @@ def add_amb(d, amb):
 PARAMS = dict(objective="binary", learning_rate=0.1, num_leaves=255, min_data_in_leaf=100, feature_fraction=0.8,
               bagging_fraction=0.7, bagging_freq=1, lambda_l2=1.0, verbose=-1, num_threads=3)
 ROUNDS = 700
+# second, differently-regularised model; the two are averaged (small, reliable variance reduction)
+PARAMS_B = dict(objective="binary", learning_rate=0.1, num_leaves=127, min_data_in_leaf=100, feature_fraction=0.6,
+                bagging_fraction=0.8, bagging_freq=1, lambda_l2=5.0, seed=7, verbose=-1, num_threads=3)
+ROUNDS_B = 700
 
 
 def fold_of(qi):
@@ -73,7 +77,9 @@ def train(work, gt_path, sample_mod=5):
         del d
         m = lgb.train(PARAMS, ds, ROUNDS)
         m.save_model(f"{work}/stage2_fold{k}.txt")
-        models.append(m)
+        mb = lgb.train(PARAMS_B, ds, ROUNDS_B)
+        mb.save_model(f"{work}/stage2b_fold{k}.txt")
+        models.append((m, mb))
         print(f"fold {k}: trained in {time.time()-t:.0f}s", flush=True)
     return models
 
@@ -96,9 +102,9 @@ def predict(work, split, models, gt_path=None):
             f = fold_of(d["qi"].to_numpy())
             p2 = np.empty(len(X), dtype=np.float64)
             for k in (0, 1):
-                p2[f == k] = models[k].predict(X[f == k], **PRED_KW)
+                p2[f == k] = (models[k][0].predict(X[f == k], **PRED_KW) + models[k][1].predict(X[f == k], **PRED_KW)) / 2
         else:
-            p2 = (models[0].predict(X, **PRED_KW) + models[1].predict(X, **PRED_KW)) / 2
+            p2 = sum(m.predict(X, **PRED_KW) for pair in models for m in pair) / 4
         d = d.select(KEEP).with_columns(pl.Series("p2", p2.astype(np.float32)))
         if truth is not None:
             d = d.join(truth, on=["qi", "si"], how="left").with_columns(pl.col("y").fill_null(0))
@@ -112,7 +118,8 @@ if __name__ == "__main__":
     if what in ("all", "train"):
         models = train(work, gt_path)
     else:
-        models = [lgb.Booster(model_file=f"{work}/stage2_fold{k}.txt") for k in (0, 1)]
+        models = [(lgb.Booster(model_file=f"{work}/stage2_fold{k}.txt"), lgb.Booster(model_file=f"{work}/stage2b_fold{k}.txt"))
+                  for k in (0, 1)]
     if what in ("all", "train", "predict_train"):
         predict(work, "train", models, gt_path)
     if what in ("all", "predict_test"):
