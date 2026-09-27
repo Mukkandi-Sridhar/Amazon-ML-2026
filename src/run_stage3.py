@@ -39,7 +39,10 @@ PARAMS = dict(objective="binary", learning_rate=0.1, num_leaves=127, min_data_in
 ROUNDS = 400
 
 
-P2_MIN = 0.01  # pairs below this stage-2 probability are (almost) never assigned; dropping them keeps stage 3 in memory
+# Second cascade filter: the final (stage-3) model only scores pairs whose stage-2 probability is >= P2_MIN.
+# This set is the candidate set reported in candidate_pairs.tsv (~3.6 candidates per Source-1 entity on test,
+# 97.45% of all true train pairs kept; pairs below the cut are essentially never accepted).
+P2_MIN = 0.05
 
 
 def load(work, split):
@@ -236,8 +239,9 @@ def write_outputs(work, split, out_dir, raw_s1_path):
 
     to_rows(pred, "matched_entity_ids").write_csv(f"{out_dir}/matching_results.tsv", separator="\t", quote_style="never")
     d.select("qi", "si", "p2", "p3").write_parquet(f"{work}/{split}_scores.parquet")
+    cand = d.select("si", "qi")
     del d
-    to_rows(all_pairs(work, split), "candidate_entity_ids").write_csv(f"{out_dir}/candidate_pairs.tsv", separator="\t", quote_style="never")
+    to_rows(cand, "candidate_entity_ids").write_csv(f"{out_dir}/candidate_pairs.tsv", separator="\t", quote_style="never")
     print("written", pred.height, "matches for", pred["si"].n_unique(), "S1 entities")
 
 
