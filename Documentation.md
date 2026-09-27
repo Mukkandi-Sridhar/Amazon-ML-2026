@@ -1,0 +1,133 @@
+# ML Challenge 2026: Business Entity Resolution Solution
+
+**Team Name:** [Your Team Name]
+**Team Members:** [List all team members]
+**Submission Date:** 2026-09-27
+
+---
+
+## 1. Executive Summary
+
+We treat every Source-2 / Source-3 record as a *query* that belongs to **at most one** Source-1 entity (a property that holds exactly in the training labels: 7,638,365 matched IDs, all unique). A three-channel sparse TF-IDF retrieval (name, address, and both combined) generates candidates. A cheap LightGBM cascade keeps the 6 best per query. A 94-feature LightGBM matcher scores them, and a context model re-scores each pair using competing claims on the same query and the same Source-1 entity. Each query is assigned to its single best Source-1 entity only when the calibrated probability clears a threshold tuned directly for macro F0.5. Key ideas that go beyond generic string similarity are a coarse **phonetic consonant skeleton** that matches names written in 7 Indic scripts against their English originals, and **house-number geometry features** that separate "neighbouring business" hard negatives from typo'd true matches.
+
+---
+
+## 2. Methodology
+
+### 2.1 Problem Analysis
+
+EDA findings on the 2.2M / 5.0M / 5.3M training records (S1 / S2 / S3):
+
+| Finding | Consequence |
+|---|---|
+| Every S2/S3 record matches **at most one** S1 entity; 26% of S2/S3 records match none. | Solve it as an *assignment*: each query picks its best S1 or abstains. This is a strong precision constraint. |
+| Matches always share the same `country` label. | Retrieval is run per country label. The label set is handled as an open set, so France (test only) works unchanged. |
+| 5.6% of S1 entities are singletons; clusters hold 1–11 records (mean 3.46). | False merges on singletons cost a full 1.0, so abstaining must be cheap. |
+| 23.5% of India S2 names and 13% of S3 names are written in Indic scripts (Devanagari, Bengali, Telugu, Tamil, Gujarati, Gurmukhi, Malayalam); Indic state names also appear inside addresses. | Transliterate to ASCII, then compare *phonetic skeletons* rather than spellings. |
+| Name noise: legal-suffix shuffles (`LLC Beacon…`, `Pvt. … Ltd.`), abbreviations, typos (`Heart1and`, `Hfiglcahdn`), duplicated words, trailing filler (`Services`, `Partners`), bracketed legal forms (`[Corp]`), phone numbers, `| www.site.com` tails, `M/s`, `>>`/`--` prefixes, DBA (`X doing business as Y`), and names replaced by a **domain** (`beaconbiotechnologies.com`). | Dedicated normaliser: legal forms canonicalised and split off, DBA split, domain stem extracted, concatenated-name skeleton. |
+| Address noise: component reordering, abbreviations (`Ct`/`Court`, `R.`/`Rue`), state code ↔ name, city variants (`Richmond City`, `City Of Superior`, `Chna Grove`), `PO Box`/`PMB`/`null`/`N/A` insertions, leading zeros (`00380`), unit suffixes (`9616-C`), missing address (3.4%). | Order-free token bags, number extraction with zero stripping, state canonicalisation, filler removal. |
+| **Hard negatives**: neighbouring businesses whose house number differs by a small amount in the *last* digit (`7344` vs `7342 Lambton Green`), while true matches show typo-style digit errors, often in the *leading* digit (`509` vs `409 Hickory Lane`). | House-number geometry features (numeric difference, which digit differs). |
+
+### 2.2 Solution Strategy
+
+**Approach Type:** Blocking (sparse retrieval) → 3-stage LightGBM cascade → constrained assignment
+**Core Innovation:** Treating matching as a many-to-one assignment with context re-scoring, plus a script-agnostic phonetic skeleton and house-number geometry features.
+
+```
+TSV ─► normalise (names, addresses, transliteration, skeletons)
+    ─► retrieval: name top-10 ∪ address top-10 ∪ combined top-15   (~23 cands / query)
+    ─► stage 1: LightGBM on 23 retrieval features → keep top-6       (candidate_pairs.tsv)
+    ─► stage 2: LightGBM on 94 pair features (string, phonetic, numeric)
+    ─► stage 3: LightGBM on stage-2 score + query/entity context
+    ─► assignment: each query → argmax S1 if p > τ   (τ tuned for macro F0.5)
+```
+
+---
+
+## 3. Candidate Generation (Blocking)
+
+- **Blocking keys used:** two IDF-weighted sparse token channels per record (IDF from Source 1 of the same country; tokens occurring in more than 1% of S1 records are dropped):
+  - *Name channel:* normalised core-name words (legal forms removed), phonetic skeleton of every word, skeleton of the whole concatenated name (so `beaconbiotechnologies.com` hits `Beacon Biotechnologies`), and DBA alias words.
+  - *Address channel:* address words (abbreviations expanded, states and filler removed) and every number in the address (leading zeros stripped).
+  - Three cosine top-K searches (`sparse_dot_topn`, per country): name-only top-10, address-only top-10, and combined (average) top-15. Their union gives ≈23 candidates per query.
+- **Stage-1 cascade:** a small LightGBM (63 leaves, 150 trees) over 23 cheap features (both channel cosines, per-channel ranks, gap to the query's best, margin to the runner-up, query flags). It keeps the **top 6** candidates per query. This final set is what the matching models see, and it is written to `candidate_pairs.tsv`.
+- **Candidate pairs generated:** train ≈ 236M retrieved → **61.9M** after the cascade; test ≈ 228M → **[TEST_PAIRS]** after the cascade.
+- **How true matches were not lost** (measured on train):
+  - Retrieval union recall is **97.57%** of all true pairs (99.74% for US records that have an address).
+  - The cascade keeps **99.41%** of the retrieved true pairs in the top 6, for an overall recall ceiling of **≈97.0%**.
+  - Most of the unrecoverable pairs have *no address* and a generic name that several S1 entities share, so they are ambiguous by construction. F0.5 would not reward guessing on them anyway.
+
+---
+
+## 4. Matching Model
+
+**Features used (stage 2, 94 in total):**
+- **Name:** RapidFuzz `ratio`, `token_sort_ratio`, `token_set_ratio`, `partial_ratio`, Jaro-Winkler on the core name; ratio / token-set on the phonetic skeleton; ratio / partial ratio on the concatenated skeleton (domain names); token-set on the full name including legal forms; DBA alias vs core; shared-word counts and containment in both directions; first-word equality; legal-form agreement (`llc`↔`llc`, `pvt ltd`↔`pvt ltd`, …).
+- **Address:** token-set / sort / ratio / partial-token-set on normalised address words; shared-word counts and containment; number-set token overlap, shared numbers and containment; primary house-number equality and Levenshtein distance; state equality after canonicalisation; city ratio / partial ratio.
+- **House-number geometry (14):** absolute, log and relative difference; same length; Hamming distance on right-aligned digits; lowest and highest differing digit position; whether the first and last digits agree; whether one side's house number appears anywhere in the other's numbers; minimum absolute distance to any number on the other side.
+- **Retrieval / cascade context:** name and address cosines, their ranks in each search, the query's best cosines, gaps and margins, the stage-1 probability, its rank, and the query's max and sum.
+- **Query flags:** address missing, name in a non-Latin script, name is a domain, source (S2/S3), token counts.
+
+`country` is deliberately **not** a feature, so France is scored with the same country-agnostic model.
+
+**Stage-3 context features:** stage-2 probability; its rank within the query; the query's max, sum and margin over its runner-up; the number of candidates. Per S1 entity, excluding the current pair: sum and max of the other pairs' probabilities, this pair's rank among them, how many *other* queries have this entity as their confident top choice (overall and from the same source), and their mean confidence.
+
+**Model type:** LightGBM gradient-boosted trees (binary log-loss) at every stage:
+- Stage 2: 255 leaves, 500 rounds, learning rate 0.1.
+- Stage 3: 127 leaves, 300 rounds.
+
+Stages 2 and 3 are **2-fold cross-fitted** by query on train. Every training pair gets an out-of-fold probability, and the two fold models are averaged for test.
+
+**Threshold selection method:** each query is assigned to its highest-scoring candidate. The assignment is kept when p₃ > τ, and τ is chosen by grid search to maximise the **exact competition metric** (macro F0.5 over *all* 2.2M train S1 entities, singletons included) on out-of-fold predictions.
+
+---
+
+## 5. Results & Error Analysis
+
+- **F_0.5 Score (macro, out-of-fold on the full training set):** **[OOF_F05]** (stage-2 score only: [OOF_F05_P2]; threshold τ = [THR])
+- **Common false positives (wrong merges):**
+  - Neighbouring businesses: same name, same street, house number off by a few units (`7344` vs `7342 Lambton Green`, `10204` vs `10203 Drew Hill Lane`). The geometry features were added for exactly this case.
+  - Sibling businesses at the *same* address with a different trade word (`Jan Consultants Ltd` vs `Jan Solutions Ltd`, `Salasar Services` vs `Salasar Finance`).
+- **Common false negatives (missed matches):**
+  - Records with *no address* and a generic name that several S1 entities share (`Primary Care Medicine`, `Wildlife Center`).
+  - A trade name entirely different from the S1 legal name at the same address (`Jaxiri Labs` vs `Parshwanath Publication Pvt Ltd`).
+  - Heavily truncated Indian addresses combined with an Indic-script name.
+
+---
+
+## 6. Conclusion
+
+A retrieval + cascade + context design scales to 26M records on a 4-core / 16 GB machine without a GPU, and it reaches **[OOF_F05]** macro F0.5 out-of-fold. The biggest wins came from framing the task as a many-to-one assignment, matching phonetic skeletons across scripts, and modelling *how* numbers differ rather than *whether* they differ. With more compute, the next steps would be a small (≤8B, Apache-2.0) multilingual cross-encoder for the ambiguous tail, and cross-source (S2↔S3) cluster consistency features.
+
+---
+
+## Appendix
+
+### A. Code Artefacts
+
+`code/business_entity_resolution/`:
+
+| File | Role |
+|---|---|
+| `run_pipeline.sh` | End-to-end entry point: `./run_pipeline.sh <dataset_dir> <work_dir> <output_dir>` |
+| `src/prepare.py` | TSV → parquet (explicit tab separator, no quoting) |
+| `src/normalize.py`, `src/run_normalize.py` | Name/address normalisation, Indic transliteration, phonetic skeleton |
+| `src/blocking.py`, `src/run_blocking_full.py` | Three-channel sparse TF-IDF retrieval per country |
+| `src/features.py` | Stage-1 retrieval features, string-similarity features, house-number geometry |
+| `src/train_stage1.py`, `src/run_features.py` | Stage-1 cascade (top-6) + pair features, streamed in chunks |
+| `src/run_stage2.py` | Cross-fitted stage-2 matcher |
+| `src/run_stage3.py` | Context model, threshold tuning on OOF macro F0.5, output writer |
+| `src/metric.py` | Exact macro F0.5 implementation |
+
+No external data, APIs, geocoders or pretrained models are used. The only dictionaries are general-knowledge abbreviation tables (US/Indian state codes, street types, legal forms).
+
+### B. Additional Results
+
+| Stage | Metric (train) |
+|---|---|
+| Retrieval union recall | 97.57% |
+| Recall by segment: US / India-Latin / India-Indic-script / no-address | 99.74% / 97.61% / 92.93% / ≈77% |
+| Stage-1 top-6 recall (of retrieved) | 99.41% |
+| Overall candidate recall ceiling | ≈97.0% |
+| Stage-2 pair precision / recall @0.5 (held-out sample) | 98.9% / 94.6% |
+| Macro F0.5 OOF (final) | [OOF_F05] |

@@ -1,0 +1,81 @@
+"""Stage-2 matcher: 2-fold cross-fitted LightGBM on train, averaged for test.
+
+Writes <work>/<split>_p2/part-*.parquet with (qi, si, p2 [, y]) plus the
+columns later stages need.
+"""
+import glob
+import os
+import sys
+import time
+
+import lightgbm as lgb
+import numpy as np
+import polars as pl
+
+from common import truth_pairs
+from features import NUM_FEATS, STAGE1_FEATS, STR_FEATS
+
+FEATS = STAGE1_FEATS + ["p1", "p1rk", "p1max", "p1sum"] + STR_FEATS + NUM_FEATS
+KEEP = ["qi", "si", "src", "p1", "cos_n", "cos_a", "n_tset", "a_tset", "pnum_eq", "num_cq", "sk_cat", "ad_empty"]
+PARAMS = dict(objective="binary", learning_rate=0.1, num_leaves=255, min_data_in_leaf=100, feature_fraction=0.8,
+              bagging_fraction=0.7, bagging_freq=1, lambda_l2=1.0, verbose=-1, num_threads=4)
+ROUNDS = 500
+
+
+def fold_of(qi):
+    return qi % 2
+
+
+def train(work, gt_path, sample_mod=10):
+    truth = truth_pairs(work, gt_path).with_columns(pl.lit(1, pl.Int8).alias("y"))
+    parts = sorted(glob.glob(f"{work}/train_feat/part-*.parquet"))
+    models = []
+    for k in (0, 1):
+        t = time.time()
+        rows = []
+        for p in parts:
+            d = pl.read_parquet(p, columns=["qi", "si"] + FEATS)
+            d = d.filter((fold_of(pl.col("qi")) != k) & ((pl.col("qi") // 2) % sample_mod == 0))
+            rows.append(d)
+        d = pl.concat(rows).join(truth, on=["qi", "si"], how="left").with_columns(pl.col("y").fill_null(0))
+        print(f"fold {k}: train rows {d.height} pos {d['y'].sum()}", flush=True)
+        ds = lgb.Dataset(d.select(FEATS).to_numpy().astype(np.float32), d["y"].to_numpy(), free_raw_data=True)
+        del d
+        m = lgb.train(PARAMS, ds, ROUNDS)
+        m.save_model(f"{work}/stage2_fold{k}.txt")
+        models.append(m)
+        print(f"fold {k}: trained in {time.time()-t:.0f}s", flush=True)
+    return models
+
+
+def predict(work, split, models, gt_path=None):
+    out = f"{work}/{split}_p2"
+    os.makedirs(out, exist_ok=True)
+    truth = truth_pairs(work, gt_path).with_columns(pl.lit(1, pl.Int8).alias("y")) if split == "train" else None
+    for p in sorted(glob.glob(f"{work}/{split}_feat/part-*.parquet")):
+        t = time.time()
+        d = pl.read_parquet(p, columns=list(dict.fromkeys(KEEP + FEATS)))
+        X = d.select(FEATS).to_numpy().astype(np.float32)
+        if split == "train":
+            f = fold_of(d["qi"].to_numpy())
+            p2 = np.where(f == 0, models[0].predict(X), models[1].predict(X))
+        else:
+            p2 = (models[0].predict(X) + models[1].predict(X)) / 2
+        d = d.select(KEEP).with_columns(pl.Series("p2", p2.astype(np.float32)))
+        if truth is not None:
+            d = d.join(truth, on=["qi", "si"], how="left").with_columns(pl.col("y").fill_null(0))
+        d.write_parquet(f"{out}/{os.path.basename(p)}")
+        print(split, os.path.basename(p), round(time.time() - t), "s", flush=True)
+
+
+if __name__ == "__main__":
+    work, gt_path = sys.argv[1], sys.argv[2]
+    what = sys.argv[3] if len(sys.argv) > 3 else "all"
+    if what in ("all", "train"):
+        models = train(work, gt_path)
+    else:
+        models = [lgb.Booster(model_file=f"{work}/stage2_fold{k}.txt") for k in (0, 1)]
+    if what in ("all", "train", "predict_train"):
+        predict(work, "train", models, gt_path)
+    if what in ("all", "predict_test"):
+        predict(work, "test", models)
