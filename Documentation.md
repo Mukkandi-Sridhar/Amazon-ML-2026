@@ -105,6 +105,22 @@ Stages 2 and 3 are **2-fold cross-fitted** by query on train. Every training pai
 1. A global threshold τ on p₃, chosen by grid search.
 2. Per-entity **expected-F0.5 maximisation.** Each entity's claimants are sorted by p₃, and the prefix length k maximising 1.25·Σ_{i≤k}p_i / (0.25·(Σ_i p_i + c) + k) is kept. k = 0 ("no match") is chosen when P(no true match) = Π(1−p_i)·e^{−c} is larger. The constant c is tuned on OOF.
 
+### 4.1 Train → test distribution shift and label-shift calibration
+
+The test set is **not** distributed like train:
+- It has 5.8 S2/S3 records per S1 entity versus 4.7 in train.
+- The share of records whose best candidate scores between 0.01 and 0.8 triples (14% vs 4.7%) in *every* country, including France.
+
+The extra records are mostly **twin businesses**: the same street with a house number a few units away, often with one name word or the legal form changed. A model calibrated on train therefore overstates match probabilities on test. The first leaderboard submissions confirmed it: 0.966 / 0.962 against out-of-fold 0.977 / 0.979, and the more aggressive model scored *lower*.
+
+We correct this without test labels, assuming only that true matches have the same score distribution on test as on train (label shift):
+1. Estimate the number of true matches on test from the near-certain band (score > 0.999, 99.96% precise on train): N_pos,test = n_test(top) · prec_train(top) / P(top | match)_train. This gives **3.40 matches per S1 entity**, consistent with train's 3.46 and an independent sanity check.
+2. For every score band, E[#matches on test] = N_pos,test · P(band | match)_train, so the test precision of the band is that count divided by n_test(band). The result is made monotone (isotonic).
+
+   Example: the band 0.90–0.95 is 93% precise on train but only **54%** on test.
+3. Each query's best-candidate score is replaced by its calibrated test precision, and the per-entity expected-F0.5 rule is applied to those probabilities.
+4. The rule is chosen by **simulating** the test macro F0.5, drawing labels from the calibrated probabilities. On train the simulator reproduces the true OOF score (0.977 vs 0.979). On test it favours the calibrated expected-F rule over the train-tuned threshold by +0.011.
+
 ---
 
 ## 5. Results & Error Analysis
