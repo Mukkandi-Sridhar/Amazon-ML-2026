@@ -144,7 +144,7 @@ We correct this without test labels, assuming only that true matches have the sa
 | v2 | + more data, claimant-consensus context | 0.9793 | 0.962 |
 | v2-cal | v2 + band-level label-shift calibration | – | 0.964 |
 | v3 | corrected transliteration, address bigrams, exact keys, token-difference features, **no** consensus, twin gate | 0.9830 | – |
-| **v4 (final)** | v3 + house-number×address-word retrieval tokens (trade-name aliases), top-8 cascade | **0.9841** | submitted |
+| **v4** | v3 + house-number×address-word retrieval tokens (trade-name aliases), top-8 cascade | **0.9841** | **0.975** |
 
 What we learned from the leaderboard:
 - Claimant consensus accepted test's twin groups.
