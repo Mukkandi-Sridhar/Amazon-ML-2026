@@ -11,6 +11,7 @@ import unicodedata
 from unidecode import unidecode
 
 # ---------------------------------------------------------------- scripts
+_TAMIL = re.compile("[\u0B80-\u0BFF]")
 _MAL_FIX = {"ൽ": "ല്", "ൻ": "ന്", "ർ": "ര്", "ൺ": "ണ്", "ൾ": "ള്", "ൿ": "ക്", "റ്റ": "ട്ട"}
 _NONLATIN = re.compile(r"[^\x00-\x7FÀ-ɏ -⁯]")
 
@@ -22,7 +23,10 @@ def to_ascii(s):
     if nonlat:
         for k, v in _MAL_FIX.items():
             s = s.replace(k, v)
+        tamil = bool(_TAMIL.search(s))
         s = unidecode(s)
+        if tamil:
+            s = s.replace("c", "s")
         s = s.replace("oN", "o").replace("N", "n")
     else:
         s = unidecode(s)
@@ -33,7 +37,7 @@ def to_ascii(s):
 # Coarse consonant skeleton.  Voiced/unvoiced pairs are merged because several
 # Indic scripts (e.g. Tamil) do not distinguish them, so "Baba" written in Tamil
 # transliterates to "paapaa".
-_SK_PRE = [("ght", "t"), ("x", "ks"), ("gi", "ji"), ("ge", "je"), ("ce", "se"), ("ci", "si"), ("cy", "sy"), ("sch", "s"), ("tion", "sn"),
+_SK_PRE = [("ght", "t"), ("ng", "n"), ("x", "ks"), ("gi", "ji"), ("ge", "je"), ("ce", "se"), ("ci", "si"), ("cy", "sy"), ("sch", "s"), ("tion", "sn"),
            ("ph", "f"), ("sh", "s"), ("ch", "k"), ("ck", "k"), ("kh", "k"), ("gh", "g"), ("th", "t"),
            ("dh", "d"), ("bh", "b"), ("jh", "j"), ("wh", "v"), ("qu", "k")]
 _SK_TABLE = str.maketrans({"b": "p", "v": "p", "w": "p", "f": "p", "d": "t", "g": "k", "c": "k", "q": "k",
@@ -67,7 +71,7 @@ LEGAL_MAP = {
     "public": "public", "cie": "cie", "ltda": "ltd", "lc": "llc", "l": None,
 }
 LEGAL = {v for v in LEGAL_MAP.values() if v}
-LEGAL_SKEL = {"prpt": "pvt", "lntt": "ltd", "lnt": "ltd", "nkrprtt": "inc", "krprsn": "corp"}
+LEGAL_SKEL = {"prpt": "pvt", "lntt": "ltd", "lnt": "ltd", "nkrprtt": "inc", "krprsn": "corp", "lp": "llp", "llp": "llp"}
 NAME_STOP = {"the", "and", "ms", "m", "of", "dba", "a"}
 _DBA = re.compile(r"\b(?:d\s*/\s*b\s*/\s*a|d\.b\.a\.?|dba|doing business as|trading as|t/a|a\.k\.a\.?|aka)\b")
 _DOMAIN = re.compile(r"^(?:https?://)?(?:www\.)?([a-z0-9][a-z0-9\-]*)\.(?:com|in|net|org|co|fr|us|biz|info|io)(?:\.[a-z]{2})?/?$")
